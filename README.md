@@ -1,95 +1,119 @@
-Linux Server Security Script
+# Linux Server Security Script
 
 Dieses interaktive Bash-Skript unterstützt Administratoren dabei, Debian/Ubuntu-Server systematisch abzusichern. Es automatisiert zahlreiche manuelle Konfigurationsaufgaben, wodurch der Aufwand und das Fehlerpotenzial deutlich reduziert werden.
-Funktionen und Features
+
+## Funktionen und Features
 
 Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßnahmen:
 
-  SSH-Härtung & -Konfiguration:
+### SSH-Härtung & -Konfiguration
 
-  Überprüfung und Optimierung von SSH-Konfigurationseinstellungen wie PasswordAuthentication, PermitRootLogin, AllowUsers und weiteren sicherheitsrelevanten Parametern.
+**Überprüfung und Optimierung der SSH-Konfiguration**  
+Einstellungen wie `PasswordAuthentication`, `PermitRootLogin`, `AllowUsers` und weitere sicherheitsrelevante Parameter werden kontrolliert und angepasst.
 
-  Automatisierte Erstellung von SSH-Schlüsselpaaren (Ed25519) inklusive der Möglichkeit, den Public Key in authorized_keys einzufügen.
+**Automatisierte Erstellung von SSH-Schlüsselpaaren**  
+Generierung von Ed25519-Schlüsseln mit der Option, den öffentlichen Schlüssel automatisch in `authorized_keys` einzufügen.
 
-  Fail2ban Einrichtung und Konfiguration:
+### Fail2ban Einrichtung und Konfiguration
 
-  Automatisierte Überprüfung und Anpassung der Fail2ban-Konfigurationsdateien, um Brute-Force-Angriffe, insbesondere auf SSH, effektiv zu verhindern.
+**Automatisierte Konfigurationsüberprüfung**  
+Anpassung der Fail2ban-Konfigurationsdateien zur effektiven Verhinderung von Brute-Force-Angriffen (insbesondere bei SSH).
 
-  Interaktive Abfragen zur Erstellung oder Anpassung der lokalen jail-Konfiguration.
+**Interaktive Konfiguration**  
+Unterstützung bei der Erstellung oder Anpassung der lokalen `jail`-Konfiguration über interaktive Abfragen.
 
-  UFW (Uncomplicated Firewall) Management:
+### UFW (Uncomplicated Firewall) Management
 
-  Analyse der aktuellen Firewall-Regeln und Erkennung von bereits erlaubten Ports.
+**Analyse der bestehenden Regeln**  
+Erkennung von bereits erlaubten Ports und Analyse der aktuellen Firewall-Konfiguration.
 
-  Interaktive Freischaltung von aktiven Host- und Container-Ports zur Anpassung der Firewall-Regeln.
+**Interaktive Freischaltung von Ports**  
+Identifikation und Freigabe aktiver Host- und Container-Ports, um die UFW-Regeln anzupassen.
 
-  Automatische Integration von Empfehlungen und bestehenden Regelkonfigurationen.
+**Automatische Integration von Empfehlungen**  
+Zusammenführung von bestehenden Regelkonfigurationen mit Sicherheitsempfehlungen.
 
-  Unattended Upgrades:
+### Unattended Upgrades
 
-  Konfiguration automatischer Sicherheitsupdates mit Hilfe der Unattended Upgrades.
+**Automatische Sicherheitsupdates**  
+Konfiguration der automatischen Installation sicherheitsrelevanter Updates mithilfe von Unattended Upgrades.
 
-  Einrichtung von E-Mail-Benachrichtigungen bei Upgrade-Fehlern, inklusive Konfiguration von Mail-Parametern via MSMTP.
+**E-Mail-Benachrichtigungen**  
+Einrichtung von Benachrichtigungen bei Upgrade-Fehlern über die Konfiguration von Mail-Parametern via MSMTP.
 
-  MSMTP Konfiguration:
+### MSMTP Konfiguration
 
-  Interaktive Einrichtung von MSMTP zur Versendung von E-Mail-Benachrichtigungen, entweder benutzerbezogen (über das Home-Verzeichnis) oder systemweit.
+**Interaktive Einrichtung**  
+Konfiguration von MSMTP zur Versendung von E-Mail-Benachrichtigungen – sowohl benutzerbezogen (über das Home-Verzeichnis) als auch systemweit.
 
-  Abfrage und Konfiguration von SMTP-Parametern wie Host, Port, TLS-Modus, Authentifizierung, etc.
+**Abfrage von SMTP-Parametern**  
+Interaktive Eingabe und Konfiguration von SMTP-Details wie Host, Port, TLS-Modus und Authentifizierungsinformationen.
 
-  Backup und Wiederherstellung:
+### Backup und Wiederherstellung
 
-  Automatisiertes Backup von Konfigurationsdateien vor Änderungen, sodass ein Rollback bei Problemen jederzeit möglich ist.
+**Automatisierte Backups**  
+Vor jeder Änderung werden Konfigurationsdateien gesichert, sodass ein Rollback bei Problemen jederzeit möglich ist.
 
-  Funktionen zur Wiederherstellung von Dateien aus den erstellten Backups.
+**Wiederherstellungsfunktionen**  
+Einfache Rückführung der Konfigurationen aus den erstellten Backups.
 
-  Paket- und Dienstmanagement:
+### Paket- und Dienstmanagement
 
-  Prüfung und automatische Installation notwendiger Pakete (z. B. fail2ban, ufw, msmtp, mailutils, lsb-release etc.).
+**Automatische Paketprüfung und Installation**  
+Überprüfung und Installation notwendiger Pakete (z. B. `fail2ban`, `ufw`, `msmtp`, `mailutils`, `lsb-release` etc.).
 
-  Verwaltung von Systemdiensten inklusive Start, Neustart, Aktivierung und Validierung des Dienststatus.
+**Verwaltung von Systemdiensten**  
+Steuerung von Systemdiensten (Start, Neustart, Aktivierung und Statusprüfung).
 
-  Port- und Container-Detection:
+### Port- und Container-Detection
 
-  Erkennung von aktiven Host-Ports sowie Container-Ports mittels des ss-Kommandos.
+**Erkennung aktiver Ports**  
+Analyse der aktiven Host-Ports und Container-Ports mittels des `ss`-Kommandos.
 
-  Integration dieser Informationen in die Firewall-Konfiguration, um ungewollte Verbindungen zu verhindern.
+**Integration in Firewall-Regeln**  
+Nutzung der erkannten Ports zur Anpassung der UFW-Regeln, um ungewollte Verbindungen zu unterbinden.
 
-  Interaktive Benutzerführung & Logging:
+### Interaktive Benutzerführung & Logging
 
-  Mehrere interaktive Bestätigungsabfragen (mittels ask_yes_no), die eine kontrollierte Durchführung sicherheitskritischer Änderungen unterstützen.
+**Interaktive Bestätigungsabfragen**  
+Nutzung von Funktionen wie `ask_yes_no` für kontrollierte und sichere Änderungen.
 
-  Umfassendes Logging aller Änderungen, um den Konfigurationsprozess nachvollziehbar zu gestalten und Fehler leichter identifizieren zu können.
+**Umfassendes Logging**  
+Detaillierte Dokumentation aller Änderungen, um den Konfigurationsprozess nachvollziehbar zu gestalten und Fehler leichter identifizieren zu können.
 
-Installation und Anwendung
+## Installation und Anwendung
 
-Repository klonen:
+1. Repository klonen:
+   ```bash
+   git clone https://github.com/DeinBenutzername/linux-server-security.git
+   ```
 
-git clone https://github.com/DeinBenutzername/linux-server-security.git
+2. In das Projektverzeichnis wechseln und das Skript ausführbar machen:
+   ```bash
+   cd linux-server-security
+   chmod +x security_script.sh
+   ```
 
-In das Projektverzeichnis wechseln und das Skript ausführbar machen:
+3. Das Skript mit Administratorrechten starten:
+   ```bash
+   sudo ./security_script.sh
+   ```
 
-cd linux-server-security
-chmod +x security_script.sh
+## Hinweise
 
-Das Skript mit Administratorrechten starten:
+- **Beta-Status:**  
+  Dieses Skript befindet sich derzeit im Beta-Stadium. Es wurde bereits eingehend getestet, jedoch gibt es weiterhin Optimierungspotenzial. Feedback und Verbesserungsvorschläge sind daher sehr willkommen.
 
-sudo ./security_script.sh
+- **Backup:**  
+  Vor dem Anwenden von Änderungen empfiehlt es sich, ein separates Backup der Konfigurationsdateien zu erstellen – das Skript erstellt automatisch Sicherungen, übernimmt aber nicht alle möglichen Szenarien.
 
-Hinweise
+- **Interaktivität:**  
+  Das Skript arbeitet interaktiv und fordert bei kritischen Entscheidungen Bestätigungen an, um eine kontrollierte Umsetzung der Änderungen zu gewährleisten.
 
-Beta-Status:
-Dieses Skript befindet sich derzeit im Beta-Stadium. Es wurde bereits eingehend getestet, jedoch gibt es weiterhin Potenzial für Optimierungen. Feedback und Verbesserungsvorschläge sind daher sehr willkommen.
+## Lizenz
 
-Backup:
-Vor dem Anwenden von Änderungen empfiehlt es sich, ein separates Backup der Konfigurationsdateien zu erstellen – das Skript übernimmt dazu bereits automatisch Sicherungen.
+Dieses Projekt steht unter der [MIT License](LICENSE) – Details findest Du in der LICENSE-Datei.
 
-Interaktivität:
-Das Skript arbeitet interaktiv und fragt bei kritischen Entscheidungen nach. Dies unterstützt eine kontrollierte Umsetzung der Sicherheitseinstellungen.
+## Beiträge und Feedback
 
-Lizenz
-
-Dieses Projekt steht unter der MIT License – Details findest Du in der LICENSE.
-
-Beiträge in Form von Issues, Pull Requests oder direkte Rückmeldungen helfen, das Skript weiter zu verbessern und an unterschiedliche Einsatzszenarien anzupassen. Jede Unterstützung ist willkommen!
-
+Beiträge in Form von Issues, Pull Requests oder direktem Feedback helfen, das Skript weiter zu verbessern und an unterschiedliche Einsatzszenarien anzupassen. Jede Unterstützung ist willkommen!
