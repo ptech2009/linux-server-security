@@ -1,5 +1,5 @@
 #!/bin/bash
-# === Interactive Linux Server Security Script (V1.5) ===
+# === Interactive Linux Server Security Script (V1.5.1) ===
 # Version: 1.5
 # Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers.
@@ -1399,7 +1399,7 @@ configure_sshguard() {
 
 # --- UFW Firewall Functions ---
 
-# Function to parse 'ufw status numbered' and populate the global map
+# Function to parse 'ufw status' and populate the global map with numeric ports only
 get_ufw_allowed_ports() {
     # Needs bash 4+ for associative arrays
     # declare -gA ufw_allowed_ports_map (declared globally)
@@ -1414,100 +1414,177 @@ get_ufw_allowed_ports() {
         return 1 # Indicate failure to get ports
     fi
 
-    local line port proto action target rule_num raw_port allowed_entry
+    # Capture UFW status output once to parse it
+    local ufw_output
+    ufw_output=$(ufw status)
 
-    # Use Process Substitution to read awk output without a subshell for the loop
-    # This ensures the global associative array is populated correctly
-    while IFS= read -r allowed_entry || [[ -n "$allowed_entry" ]]; do # Read output line by line
-        if [[ -n "$allowed_entry" ]]; then # Ensure line is not empty
-            ufw_allowed_ports_map["$allowed_entry"]=1
-            debug "Added allowed UFW entry: $allowed_entry"
+    # Add debug output to see what we're working with
+    debug "Raw UFW Status:"
+    debug "$ufw_output"
+
+    # Process the output to extract port numbers
+    local port_list
+    port_list=$(echo "$ufw_output" | awk '
+        # Skip everything until we find the header line
+        /^To[ \t]+Action[ \t]+From/ { in_rules = 1; next }
+
+        # Process only if we are in the rules section
+        in_rules {
+            # Skip blank lines
+            if (NF == 0) next
+
+            # Look for ALLOW action
+            if ($2 ~ /ALLOW/) {
+                # Extract port numbers from different formats in the "To" column
+                to_field = $1
+
+                # Format: 22/tcp
+                if (to_field ~ /^[0-9]+\/(tcp|udp)$/) {
+                    split(to_field, parts, "/")
+                    port = parts[1]
+                    if (port > 0 && port < 65536) print port
+                }
+                # Format: 22 (standalone number that is a port)
+                else if (to_field ~ /^[0-9]+$/) {
+                    port = to_field
+                    if (port > 0 && port < 65536) print port
+                }
+                # Handle service names that may appear instead of port numbers
+                else if (to_field ~ /^[a-zA-Z]+\/(tcp|udp)$/) {
+                    # Service names like "ssh/tcp" are handled here
+                    # You could use getent services to resolve these if needed
+                    debug "Service name found: " to_field
+                }
+            }
+        }
+    ' | sort -un)
+
+    # Populate the associative array
+    while read -r port; do
+        if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+            ufw_allowed_ports_map["$port"]=1
+            debug "Added allowed UFW port: $port"
         fi
-    done < <(
-        ufw status numbered | awk '
-            # Focus on lines starting with [ number]
-            /^[[:space:]]*\[[0-9]+\]/ {
-                # Determine action and direction (handle variations like ALLOW IN vs ALLOW)
-                action = $3
-                # Check if 4th field is IN (covers ALLOW IN Anywhere)
-                # Or if 5th field is IN (covers ALLOW IN x.x.x.x) - adjust if needed
-                direction = ($4 == "IN" || $5 == "IN") ? "IN" : "UNKNOWN"
-
-                # Check if action is ALLOW and direction is IN
-                if (action != "ALLOW" || direction != "IN") {
-                    # Optional Debug: print "Skipping rule (Not ALLOW IN): " $0 > "/dev/stderr"
-                    next
-                }
-
-                raw_port = $2 # Field containing port, port/proto, or app name
-
-                port = ""
-                proto = ""
-
-                if (raw_port ~ /^([0-9]+)\/([a-z]+)$/) { # Format: port/proto
-                    port = gensub(/^([0-9]+)\/([a-z]+)$/, "\\1", "1", raw_port)
-                    proto = gensub(/^([0-9]+)\/([a-z]+)$/, "\\2", "1", raw_port)
-                } else if (raw_port ~ /^[0-9]+$/) { # Format: port (assume tcp)
-                    port = raw_port
-                    proto = "tcp"
-                } else { # Skip app names or other formats
-                     # Optional Debug: print "Skipping rule (Cannot parse port): " $0 > "/dev/stderr"
-                    next
-                }
-
-                # Basic validation
-                if (port > 0 && port < 65536) {
-                     printf "%s/%s\n", port, proto
-                } else {
-                     # Optional Debug: print "Skipping rule (Invalid port number): " $0 > "/dev/stderr"
-                }
-             }'
-    )
+    done <<< "$port_list"
 
     debug "Finished populating ufw_allowed_ports_map. Size: ${#ufw_allowed_ports_map[@]}"
-    # Check if map is empty AFTER parsing, could indicate parsing failure
-    # Allow empty map if parsing itself was successful (e.g., no rules exist)
-    # The check 'if ! ufw status ...' at the start handles UFW being off entirely.
-    # if [[ ${#ufw_allowed_ports_map[@]} -eq 0 ]]; then
-    #     warn "UFW allowed ports map is empty. Parsing might have failed or no ALLOW IN rules exist."
-    # fi
+    # Debug: List all allowed ports
+    for port in "${!ufw_allowed_ports_map[@]}"; do
+        debug "UFW allowed port in map: $port"
+    done
     return 0 # Return success
 }
 
-
-# Function to identify listening ports (simple version using ss)
+# Function to identify listening ports with protocol information
 get_listening_ports() {
-    # Use ss to find TCP listening ports (LISTEN state)
-    # -l: listening sockets
-    # -t: TCP sockets
-    # -n: numeric output (don't resolve names)
-    # awk extracts the port number from the local address column
-    ss -ltn | awk '
-        NR > 1 && $1 == "LISTEN" { # Skip header, check state
-            # Use $5 for Local Address/Port with iproute2 `ss`
-            split($5, addr, ":");
-            port = addr[length(addr)]; # Get last element after splitting by ":"
-            if (port ~ /^[0-9]+$/ && port > 0 && port < 65536) { # Validate port
-                 # Check if already printed to avoid duplicates from IPv4/IPv6 on same port
-                 if (!seen[port]++) {
-                     print port
-                 }
+    # Execute ss to get TCP and UDP listening sockets
+    local ss_tcp_output ss_udp_output
+    ss_tcp_output=$(ss -ltn)
+    ss_udp_output=$(ss -lun)
+
+    debug "Raw ss TCP output:"
+    debug "$ss_tcp_output"
+    debug "Raw ss UDP output:"
+    debug "$ss_udp_output"
+
+    # Parse ss TCP output to extract port numbers with protocol
+    local tcp_port_list
+    tcp_port_list=$(echo "$ss_tcp_output" | awk '
+        # Skip the header line
+        NR > 1 {
+            # Extract port from the Local Address:Port column (usually $4 or $5)
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /:/) {  # Find field containing colon (address:port format)
+                    split($i, addr_parts, ":")
+                    # Get the last part (port number)
+                    port = addr_parts[length(addr_parts)]
+                    # If port contains % (interface), remove it
+                    sub(/%.*$/, "", port)
+                    # Validate port is numeric and in valid range
+                    if (port ~ /^[0-9]+$/ && port > 0 && port < 65536) {
+                        print port ",tcp"
+                    }
+                }
             }
-        }' | sort -un
-}
-get_container_ports() {
-    # Placeholder: Implement logic to get ports exposed by containers (Docker, Podman, etc.)
-     debug "Searching for container ports via ss (placeholder)..."
-     # Example using ss to find ports listened by processes matching 'docker' or 'podman'
-     # This is indicative and might need refinement based on actual setup
-     # pids=$(ps -eo pid,comm | awk '/docker|podman/ {print $1}')
-     # for pid in $pids; do
-     #     ss -ltnp "users:((\"\",pid=$pid))" | awk ... # Complex ss filter
-     # done
-     echo "" # Return empty for now
-     debug "Container port detection not fully implemented."
+        }
+    ')
+
+    # Parse ss UDP output to extract port numbers with protocol
+    local udp_port_list
+    udp_port_list=$(echo "$ss_udp_output" | awk '
+        # Skip the header line
+        NR > 1 {
+            # Extract port from the Local Address:Port column (usually $4 or $5)
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /:/) {  # Find field containing colon (address:port format)
+                    split($i, addr_parts, ":")
+                    # Get the last part (port number)
+                    port = addr_parts[length(addr_parts)]
+                    # If port contains % (interface), remove it
+                    sub(/%.*$/, "", port)
+                    # Validate port is numeric and in valid range
+                    if (port ~ /^[0-9]+$/ && port > 0 && port < 65536) {
+                        print port ",udp"
+                    }
+                }
+            }
+        }
+    ')
+
+    # Combine TCP and UDP port lists
+    echo "${tcp_port_list}"
+    echo "${udp_port_list}"
+
+    # Debug: show what ports we found
+    debug "Detected listening ports from ss:"
+    while IFS="," read -r port proto; do
+        if [[ -n "$port" && -n "$proto" ]]; then
+            debug "  - Listening port: $port/$proto"
+        fi
+    done <<< "${tcp_port_list}${udp_port_list:+$'\n'$udp_port_list}"
 }
 
+get_container_ports() {
+    # Check if Docker is installed and running
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker; then
+        debug "Docker detected, checking for container ports..."
+        # Get ports exposed by running Docker containers
+        local docker_ports
+        docker_ports=$(docker ps --format '{{.Ports}}' | grep -oE ':[0-9]+->' | tr -d ':>' | sort -un)
+
+        if [[ -n "$docker_ports" ]]; then
+            # Add protocol information (assume TCP for simplicity)
+            while read -r port; do
+                if [[ -n "$port" ]]; then
+                    echo "${port},tcp"
+                    debug "Found Docker port: ${port}/tcp"
+                fi
+            done <<< "$docker_ports"
+        fi
+    else
+        debug "Docker not detected or not running."
+    fi
+
+    # Check if Podman is installed
+    if command -v podman &>/dev/null; then
+        debug "Podman detected, checking for container ports..."
+        # Get ports exposed by running Podman containers
+        local podman_ports
+        podman_ports=$(podman ps --format '{{.Ports}}' 2>/dev/null | grep -oE ':[0-9]+->' | tr -d ':>' | sort -un)
+
+        if [[ -n "$podman_ports" ]]; then
+            # Add protocol information (assume TCP for simplicity)
+            while read -r port; do
+                if [[ -n "$port" ]]; then
+                    echo "${port},tcp"
+                    debug "Found Podman port: ${port}/tcp"
+                fi
+            done <<< "$podman_ports"
+        fi
+    else
+        debug "Podman not detected."
+    fi
+}
 
 configure_ufw() {
     info "${C_BOLD}5. UFW (Firewall) Configuration${C_RESET}"
@@ -1542,7 +1619,7 @@ configure_ufw() {
                 info "Ensuring SSH port $ssh_port_ufw is allowed before enabling UFW..."
                 ufw allow "$ssh_port_ufw/tcp" comment "Allow SSH access before UFW enable"
             else
-                 warn "Could not determine SSH port. Skipping pre-allow rule."
+                warn "Could not determine SSH port. Skipping pre-allow rule."
             fi
             # Now enable
             ufw enable && success "UFW enabled." || error "Failed to enable UFW."
@@ -1554,50 +1631,56 @@ configure_ufw() {
     fi
 
     # Get currently allowed ports using the improved function
-    # This populates the global ufw_allowed_ports_map
+    # This populates the global ufw_allowed_ports_map with numeric ports only
     if ! get_ufw_allowed_ports; then
          # Error message is printed inside the function if UFW is inactive
          error "Could not reliably get UFW allowed ports. Skipping interactive check."
          echo "--- Section 5 completed ---"; echo; return 1
     fi
-    info "Currently allowed ports/protocols in UFW map (found ${#ufw_allowed_ports_map[@]} entries)."
-    # Optional: Print the map content for debugging
-    # for key in "${!ufw_allowed_ports_map[@]}"; do echo " - $key"; done
+    info "Currently allowed ports in UFW map (found ${#ufw_allowed_ports_map[@]} entries)."
+    # Print the map content for debugging
+    debug "UFW allowed ports in map:"
+    for key in "${!ufw_allowed_ports_map[@]}"; do debug " - $key"; done
 
-
-    # Identify listening ports
+    # Identify listening ports with protocol information
     info "Determining listening host ports..."
     local host_ports_str; host_ports_str=$(get_listening_ports)
+
+    # Create associative array for listening ports with protocol info
+    declare -A listening_ports_map
+
     if [[ -z "$host_ports_str" ]]; then
-         warn "Could not detect any listening host ports via ss."
-         local host_ports=()
+        warn "Could not detect any listening host ports via ss."
     else
-         read -ra host_ports <<< "$host_ports_str" # Read into array
-         success "Detected Host Ports: ${host_ports[*]}"
+        while IFS="," read -r port proto; do
+            if [[ -n "$port" && -n "$proto" ]]; then
+                listening_ports_map["$port"]="$proto"
+                debug "Added listening port to map: $port/$proto"
+            fi
+        done <<< "$host_ports_str"
+        success "Detected ${#listening_ports_map[@]} listening host ports."
     fi
 
-    # Identify container ports (placeholder)
+    # Identify container ports
     info "Determining container ports..."
     local container_ports_str; container_ports_str=$(get_container_ports)
-     if [[ -z "$container_ports_str" ]]; then
-         info "No container ports detected (or feature not implemented)."
-         local container_ports=()
+
+    if [[ -n "$container_ports_str" ]]; then
+        while IFS="," read -r port proto; do
+            if [[ -n "$port" && -n "$proto" ]]; then
+                listening_ports_map["$port"]="$proto"
+                debug "Added container port to map: $port/$proto"
+            fi
+        done <<< "$container_ports_str"
+        success "Added container ports to the listening ports map."
     else
-         read -ra container_ports <<< "$container_ports_str" # Read into array
-         success "Detected Container Ports: ${container_ports[*]}"
-         # Combine host and container ports for checking
-         host_ports+=("${container_ports[@]}")
-         # Make unique again
-         local unique_ports_str; unique_ports_str=$(printf '%s\n' "${host_ports[@]}" | sort -un)
-         read -ra host_ports <<< "$unique_ports_str"
+        info "No container ports detected."
     fi
 
-    if [[ ${#host_ports[@]} -eq 0 ]]; then
-         info "No listening ports found to check against firewall."
-         echo "--- Section 5 completed ---"; echo; return 0
+    if [[ ${#listening_ports_map[@]} -eq 0 ]]; then
+        info "No listening ports found to check against firewall."
+        echo "--- Section 5 completed ---"; echo; return 0
     fi
-
-    success "Ports to check against firewall: ${host_ports[*]}"
 
     # Get current SSH port
     local ssh_port; ssh_port=$(get_effective_sshd_config "port")
@@ -1605,63 +1688,54 @@ configure_ufw() {
     if validate_port "$ssh_port"; then
         success "Detected SSH Port: $ssh_port."
     else
-         warn "Could not reliably determine SSH port, assuming 22."
-         ssh_port=22
+        warn "Could not reliably determine SSH port, assuming 22."
+        ssh_port=22
     fi
 
     # Interactively check ports
     info "Starting interactive port allow check..."
     local ports_to_allow=() ports_to_deny=() port_info
 
-    for port in "${host_ports[@]}"; do
-        local map_key_tcp="$port/tcp"
-        local map_key_udp="$port/udp" # Key for potential UDP check
+    for port in "${!listening_ports_map[@]}"; do
+        local proto="${listening_ports_map[$port]}"
 
-        # Always allow the detected SSH port (TCP)
-        if [[ "$port" == "$ssh_port" ]]; then
-             # Check if SSH port/tcp is already allowed using the map
-             if [[ -v ufw_allowed_ports_map["$map_key_tcp"] ]]; then
-                  info "SSH port $port/tcp already allowed (Skipping)."
-             else
-                  info "SSH port $port/tcp -> Will be automatically ALLOWED."
-                  ports_to_allow+=("$port/tcp")
-             fi
-             continue # Move to next port
-        fi
+        # Debug: Check port comparison
+        debug "Checking port $port/$proto against UFW allowed ports map"
 
-        # Check if port/tcp is already allowed using the map
-        if [[ -v ufw_allowed_ports_map["$map_key_tcp"] ]]; then
-            info "Port $port/tcp already allowed (Skipping)."
+        # Check if port is already allowed (pure numeric comparison)
+        if [[ -v ufw_allowed_ports_map["$port"] ]]; then
+            info "Port $port already allowed in UFW (Skipping)."
             continue
         fi
 
-        # --- Port is listening but not explicitly allowed via TCP in UFW ---
+        # Always allow the detected SSH port for TCP
+        if [[ "$port" == "$ssh_port" && "$proto" == "tcp" ]]; then
+            info "SSH port $port/$proto -> Will be automatically ALLOWED."
+            ports_to_allow+=("$port/$proto")
+            continue # Move to next port
+        fi
+
+        # --- Port is listening but not explicitly allowed in UFW ---
 
         # Get process info for context (best effort)
-        # Corrected ss command to match format used in get_listening_ports
-        port_info=$(ss -ltnp "sport = :$port" | awk 'NR==2 { match($0, /users:\(\("([^"]+)"/); if (RSTART) print substr($0, RSTART+8, RLENGTH-9) }') # Extract process name more reliably
+        if [[ "$proto" == "tcp" ]]; then
+            port_info=$(ss -ltnp "sport = :$port" 2>/dev/null | awk 'NR==2 { match($0, /users:\(\("([^"]+)"/); if (RSTART) print substr($0, RSTART+8, RLENGTH-9) }')
+        else
+            port_info=$(ss -lunp "sport = :$port" 2>/dev/null | awk 'NR==2 { match($0, /users:\(\("([^"]+)"/); if (RSTART) print substr($0, RSTART+8, RLENGTH-9) }')
+        fi
         [[ -z "$port_info" ]] && port_info="Unknown Process"
 
         echo # Add newline for readability
-        info "Detected listening port: ${C_BOLD}$port${C_RESET} (Process hint: $port_info) - ${C_YELLOW}Rule NOT FOUND or not ALLOW IN.${C_RESET}"
+        info "Detected listening port: ${C_BOLD}$port/$proto${C_RESET} (Process: $port_info) - ${C_YELLOW}Not allowed in UFW.${C_RESET}"
 
-        # Ask user whether to allow TCP (common case)
-        if ask_yes_no "Allow incoming connections to TCP port $port?" "n"; then
-            ports_to_allow+=("$port/tcp")
+        # Ask user whether to allow this port/protocol
+        if ask_yes_no "Allow incoming connections to $port/$proto?" "n"; then
+            ports_to_allow+=("$port/$proto")
+            success "Port $port/$proto -> Marked for ALLOW."
         else
-            warn "Port $port/tcp -> Marked for DENY (no rule will be added)."
-            ports_to_deny+=("$port/tcp") # Track denials for summary
+            warn "Port $port/$proto -> Marked for DENY (no rule will be added)."
+            ports_to_deny+=("$port/$proto") # Track denials for summary
         fi
-        # Optional: Ask separately for UDP if needed
-        # if [[ ! -v ufw_allowed_ports_map["$map_key_udp"] ]]; then # Check UDP only if not already allowed
-        #     if ask_yes_no "Allow incoming connections to UDP port $port?" "n"; then
-        #         ports_to_allow+=("$port/udp")
-        #     else
-        #         warn "Port $port/udp -> Marked for DENY."
-        #         ports_to_deny+=("$port/udp")
-        #     fi
-        # fi
-
     done
 
     # Apply the rules chosen by the user
@@ -1669,21 +1743,24 @@ configure_ufw() {
         info "Applying new ALLOW rules for: ${ports_to_allow[*]}"
         local rule_applied=false
         for rule in "${ports_to_allow[@]}"; do
-             # Add comment to identify rules added by the script
-             local comment="Allowed by security script v2.8.4" # Update version in comment
-             # Use insert 1 to put rules at the top (less likely to conflict)
-             # Double-check rule doesn't exist just before adding (ufw might handle this)
-             # Refined check using parsed map instead of grep
-             if [[ ! -v ufw_allowed_ports_map["$rule"] ]]; then
-                 if ufw insert 1 allow "$rule" comment "$comment"; then
-                     success "Rule 'ALLOW $rule' added."
-                     log_change "UFW_RULE_ADDED:ALLOW $rule"
-                     rule_applied=true
-                 else
-                      error "Failed to add rule 'ALLOW $rule'."
-                 fi
+            # Extract port number from rule (e.g. from "9100/tcp" get "9100")
+            local port_num="${rule%%/*}"
+
+            # Add comment to identify rules added by the script
+            local comment="Allowed by security script v2.8.4" # Update version in comment
+
+            # Check if port is already allowed
+            if [[ ! -v ufw_allowed_ports_map["$port_num"] ]]; then
+                if ufw insert 1 allow "$rule" comment "$comment"; then
+                    success "Rule 'ALLOW $rule' added."
+                    log_change "UFW_RULE_ADDED:ALLOW $rule"
+                    ufw_allowed_ports_map["$port_num"]=1 # Update map with newly allowed port
+                    rule_applied=true
+                else
+                    error "Failed to add rule 'ALLOW $rule'."
+                fi
             else
-                 info "Rule for '$rule' seems to exist already (found in map). Skipping add."
+                info "Rule for port '$port_num' seems to exist already. Skipping add."
             fi
         done
         # Refresh map if rules were added
@@ -1701,18 +1778,21 @@ configure_ufw() {
     local final_allowed_str=""
     # Sort the keys for consistent output
     local sorted_keys
-    sorted_keys=$(printf '%s\n' "${!ufw_allowed_ports_map[@]}" | sort -V)
+    sorted_keys=$(printf '%s\n' "${!ufw_allowed_ports_map[@]}" | sort -n)
     while IFS= read -r key; do final_allowed_str+="$key "; done <<< "$sorted_keys"
     final_allowed_str=$(echo "$final_allowed_str" | sed 's/ $//') # Trim trailing space
 
-    info "Allowed Ports/Protocols (active rules map): $final_allowed_str"
+    info "Allowed Ports (numeric values): $final_allowed_str"
     if [[ ${#ports_to_deny[@]} -gt 0 ]]; then
-         info "Ports user chose NOT to allow in this run: ${ports_to_deny[*]}"
+        info "Ports user chose NOT to allow in this run: ${ports_to_deny[*]}"
     fi
 
     echo "--- Section 5 completed ---"
     echo
 }
+
+# End of ufw functions
+
 
 
 configure_journald() {
