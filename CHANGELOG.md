@@ -5,11 +5,14 @@ Dieses Dokument enthält alle wesentlichen Neuerungen, Features und Bugfixes des
 
 ---
 
-## 📦 Version 1.5 – April 2025
+## 📦 Version 1.5.1 – April 2025
 
 ---
 
 ## ✨ English:
+
+#Bugfix:
+- The UFW port logic has been adapted so that only numerical port values are now extracted and compared.
 
 ### New Features
 - Refactored into modular structure (improved maintainability)
@@ -40,6 +43,9 @@ Dieses Dokument enthält alle wesentlichen Neuerungen, Features und Bugfixes des
 ---
 
 ## 🇩🇪 Deutsch:
+
+#Bugfix:
+- Die UFW-Portlogik wurde angepasst, sodass jetzt ausschließlich numerische Portwerte extrahiert und verglichen werden.
 
 ### Neue Features
 - Refaktorierung mit modularer Struktur (bessere Wartbarkeit)
