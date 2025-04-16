@@ -62,11 +62,11 @@ While the script automatically backs up modified configs, it's still a good idea
 
 Interactive behavior:
 This script runs in interactive mode and requires confirmations for critical actions to ensure safe execution.
+
 📄 License
-
 This project is licensed under the MIT License – see the LICENSE file for details.
-🤝 Contributions & Feedback
 
+🤝 Contributions & Feedback
 Suggestions, bug reports, or pull requests are always welcome and appreciated. Every bit of input helps improve the script and adapt it to new use cases!
 
 
