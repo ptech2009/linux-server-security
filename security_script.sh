@@ -1,6 +1,6 @@
 #!/bin/bash
-# === Interactive Linux Server Security Script (V1.5.1) ===
-# Version: 1.5
+# === Interactive Linux Server Security Script (V1.5.2) ===
+# Version: 1.5.2
 # Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers.
 # License: Free to use, but at your own risk. NO WARRANTY.
@@ -212,10 +212,22 @@ configure_ssh_key_and_users() {
         warn "No Ed25519 key pair found in '$user_home/.ssh'."
     fi
 
-    if ask_yes_no "Create new Ed25519 SSH key pair for '$current_user'?" "n"; then
+    if ask_yes_no "Create new Ed25519 SSH key pair for '$current_user'?" "y"; then # Default to Yes now? Or keep No? Let's keep N for safety.
         local new_key_name; read -p "Filename for new key (e.g., id_ed25519_new): " new_key_name
-        new_key_name=${new_key_name:-id_ed25519_new} # Default filename
+        new_key_name=${new_key_name:-id_ed25519_$(date +%Y%m%d)} # Default filename with date
         local key_path="$user_home/.ssh/$new_key_name"
+        local pub_key_path="${key_path}.pub"
+        local authorized_keys_path="$user_home/.ssh/authorized_keys"
+
+        # Check if key files already exist
+        if [[ -f "$key_path" || -f "$pub_key_path" ]]; then
+             warn "Key file '$key_path' or '$pub_key_path' already exists."
+             if ! ask_yes_no "Overwrite existing key files?" "n"; then
+                  info "Skipping key generation."
+                  echo "--- Section 1 completed ---"; echo; return 0
+             fi
+        fi
+
 
         # Prompt for passphrase securely
         local passphrase passphrase_confirm
@@ -226,23 +238,65 @@ configure_ssh_key_and_users() {
         done
 
         # Create .ssh directory if it doesn't exist and set correct permissions/ownership
+        # Run as root first to ensure directory exists, then chown
         mkdir -p "$user_home/.ssh"
         chmod 700 "$user_home/.ssh"
         chown "$current_user":"$current_user" "$user_home/.ssh" # Ensure user owns their .ssh dir
 
         # Generate the key as the target user
-        sudo -u "$current_user" ssh-keygen -q -t ed25519 -f "$key_path" -N "$passphrase"
-        if [[ $? -eq 0 ]]; then
+        # Using '-f' forces overwrite if user confirmed above
+        info "Generating new SSH key pair..."
+        if sudo -u "$current_user" ssh-keygen -q -t ed25519 -f "$key_path" -N "$passphrase"; then
             success "SSH key pair '${key_path}' created."
-            # Set correct permissions for key files
-            chmod 600 "$key_path"; chmod 644 "${key_path}.pub"
-            chown "$current_user":"$current_user" "$key_path" "${key_path}.pub"
-            info "Public key: ${key_path}.pub"
-            info "Please add to ~/.ssh/authorized_keys on the target servers."
-            [[ -n "$passphrase" ]] && warn "Store passphrase securely!"
+            # Set correct permissions for key files (as root, then chown)
+            chmod 600 "$key_path"; chmod 644 "$pub_key_path"
+            chown "$current_user":"$current_user" "$key_path" "$pub_key_path"
             log_change "SSH_KEY_GENERATED:${key_path}"
+
+            # --- Display Private Key ---
+            echo # Newline for separation
+            warn "--- Private Key ($(basename "$key_path")) --- SENSIBLE INFORMATION! ---"
+            # Read and display the private key content
+            if [[ -f "$key_path" ]]; then
+                 sudo -u "$current_user" cat "$key_path" # Display as the user for safety
+            else
+                 error "Could not read private key file '$key_path' to display."
+            fi
+            warn "--- End Private Key --- Copy this to a secure location ---"
+            echo # Newline for separation
+
+
+            # --- Automatically Add Public Key to authorized_keys ---
+            info "Adding public key to '$authorized_keys_path'..."
+            # Ensure authorized_keys file exists with correct permissions/ownership
+             if ! sudo -u "$current_user" test -f "$authorized_keys_path"; then
+                 sudo -u "$current_user" touch "$authorized_keys_path"
+                 sudo -u "$current_user" chmod 600 "$authorized_keys_path"
+                 info "Created '$authorized_keys_path'."
+             fi
+
+            # Check if the key is already present (run grep as the user)
+            local pub_key_content; pub_key_content=$(sudo -u "$current_user" cat "$pub_key_path")
+            if sudo -u "$current_user" grep -Fq -- "$pub_key_content" "$authorized_keys_path"; then
+                 success "Public key already exists in '$authorized_keys_path'."
+            else
+                 # Append the public key (as the user)
+                 if echo "$pub_key_content" | sudo -u "$current_user" tee -a "$authorized_keys_path" > /dev/null; then
+                      success "Public key added to '$authorized_keys_path'."
+                      log_change "AUTHORIZED_KEY_ADDED:${pub_key_path}"
+                 else
+                      error "Failed to add public key to '$authorized_keys_path'."
+                 fi
+            fi
+
+            # --- Final Messages ---
+            echo # Newline
+            info "Public key file location: $pub_key_path"
+            info "${C_YELLOW}Reminder:${C_RESET} Add the public key manually to ~/.ssh/authorized_keys on any ${C_BOLD}target servers${C_RESET} you want to connect to."
+            [[ -n "$passphrase" ]] && warn "Remember to store the passphrase securely!"
+
         else
-            error "Error during key creation (as '$current_user')."
+            error "Error during key creation (as '$current_user'). Check permissions or if key exists without overwrite permission."
         fi
     fi
     echo "--- Section 1 completed ---"
