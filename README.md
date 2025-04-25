@@ -72,6 +72,7 @@ sudo ./security_script.sh
 📄 License
 
 This project is licensed under the MIT License – see the LICENSE file for details.
+
 🤝 Contributions & Feedback
 
 Suggestions, bug reports, or pull requests are always welcome and appreciated. Every bit of input helps improve the script and adapt it to new use cases!
