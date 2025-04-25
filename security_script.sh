@@ -1,8 +1,8 @@
 #!/bin/bash
-# === Interactive Linux Server Security Script (V1.5.2) ===
-# Version: 1.5.2
-# Author: Paul Schumacher
-# Purpose: Check and harden Debian/Ubuntu servers.
+# === Interactive Linux Server Security Script ===
+# Version: 1.6.0
+# Original Author: Paul Schumacher
+# Purpose: Check and harden Debian/Ubuntu servers
 # License: Free to use, but at your own risk. NO WARRANTY.
 #
 # Backup and Recovery:
@@ -294,7 +294,6 @@ configure_ssh_key_and_users() {
             info "Public key file location: $pub_key_path"
             info "${C_YELLOW}Reminder:${C_RESET} Add the public key manually to ~/.ssh/authorized_keys on any ${C_BOLD}target servers${C_RESET} you want to connect to."
             [[ -n "$passphrase" ]] && warn "Remember to store the passphrase securely!"
-
         else
             error "Error during key creation (as '$current_user'). Check permissions or if key exists without overwrite permission."
         fi
@@ -338,7 +337,7 @@ is_uu_param_true() {
     if [[ "$value" == "true" ]]; then
         return 0 # Parameter is true
     else
-        return 1 # Parameter is not true or not found uncommented
+         return 1 # Parameter is not true or not found uncommented
     fi
 }
 
@@ -356,7 +355,7 @@ configure_unattended_upgrades() {
     if ! is_package_installed "$pkg"; then
         warn "'$pkg' not installed."
         if ask_yes_no "Install '$pkg'?" "y"; then
-            # Run apt update if not already done by this script run
+             # Run apt update if not already done by this script run
             if ! $SCRIPT_APT_UPDATED; then
                  info "Running 'apt update'..."
                  apt update && SCRIPT_APT_UPDATED=true || { error "'apt update' failed."; return 1; }
@@ -480,7 +479,6 @@ configure_unattended_upgrades() {
     fi
 
     [[ "$config_correct" = false ]] && apply_changes=true || success "Unattended Upgrades configuration meets recommendations."
-
     # --- Apply changes if needed and confirmed ---
     if [[ "$apply_changes" = true ]]; then
         warn "Settings deviate or are missing from recommendations."
@@ -578,7 +576,7 @@ configure_unattended_upgrades() {
             local mail_only_error_recheck="Unattended-Upgrade::MailOnlyOnError"
              if ! is_uu_param_true "$mail_only_error_recheck" "$config_file"; then
                  warn "MailOnlyOnError verification failed after applying changes. Please check '$config_file' manually."
-             else
+            else
                  success "MailOnlyOnError is now set to 'true'."
             fi
 
@@ -729,8 +727,8 @@ EOF
                  chmod 600 "${user_home}/.msmtp.log"
             fi
 
-            success "MSMTP configuration saved in '$config_file_path'."
-            log_change "ADDED_FILE:$config_file_path" # Log creation/overwrite
+             success "MSMTP configuration saved in '$config_file_path'."
+             log_change "ADDED_FILE:$config_file_path" # Log creation/overwrite
 
             # Send test email if mailutils is installed
             if is_package_installed "$mailutils_pkg"; then
@@ -743,7 +741,7 @@ EOF
                     fi # <<<--- CORRECTED FI LOCATION
                 fi
             else
-                warn "Package 'mailutils' not found, skipping test email."
+                 warn "Package 'mailutils' not found, skipping test email."
             fi
         fi
     fi
@@ -792,7 +790,7 @@ configure_ssh_hardening() {
                     normalized_target=$(echo "$target_users" | tr ' ' '\n' | sort | tr '\n' ' ')
                     sorted_target=$(echo "$normalized_target" | sed 's/ $//') # Remove trailing space
 
-                    if [[ "$sorted_effective" == "$sorted_target" ]]; then
+                     if [[ "$sorted_effective" == "$sorted_target" ]]; then
                         success "AllowUsers is already set correctly to '$target_users'."
                     else
                         if ask_yes_no "Change AllowUsers from '$effective_allow_users' to '$target_users'?" "y"; then
@@ -800,7 +798,7 @@ configure_ssh_hardening() {
                         fi
                     fi
                 else
-                    # No current AllowUsers setting found
+                     # No current AllowUsers setting found
                     if ask_yes_no "Set AllowUsers to '$target_users'?" "y"; then
                         apply_allowusers=true
                     fi
@@ -816,7 +814,7 @@ configure_ssh_hardening() {
                     else
                         # Parameter doesn't exist, add it
                         echo "" >> /etc/ssh/sshd_config # Ensure newline before adding
-                        echo "AllowUsers $target_users" >> /etc/ssh/sshd_config
+                         echo "AllowUsers $target_users" >> /etc/ssh/sshd_config
                     fi
                     log_change "MODIFIED_PARAM:AllowUsers:$target_users"
 
@@ -839,8 +837,8 @@ configure_ssh_hardening() {
                              return 1
                         fi
                     else
-                        error "SSH configuration test ('sshd -t') failed. Changes will not be applied."
-                        restore_file "/etc/ssh/sshd_config"
+                         error "SSH configuration test ('sshd -t') failed. Changes will not be applied."
+                         restore_file "/etc/ssh/sshd_config"
                         return 1
                     fi
                 fi
@@ -921,9 +919,11 @@ configure_ssh_hardening() {
             # Provide explanation for the recommendation
             case "$param" in
                 "PermitRootLogin")
-                    echo "Explanation: Disabling direct root login (with password) hardens against brute-force attacks. 'prohibit-password' still allows key-based root login." ;;
+                     echo "Explanation: Disabling direct root login (with password) hardens against brute-force attacks. 'prohibit-password' still allows key-based root login."
+                     ;;
                 "ChallengeResponseAuthentication")
-                    echo "Explanation: Disabling allows clearer separation; authentication methods managed elsewhere (e.g., PasswordAuthentication, PubkeyAuthentication, PAM)." ;;
+                    echo "Explanation: Disabling allows clearer separation; authentication methods managed elsewhere (e.g., PasswordAuthentication, PubkeyAuthentication, PAM)."
+                    ;;
                 "PasswordAuthentication")
                     echo "Explanation: Key-based authentication is more secure. ${C_RED}WARNING:${C_RESET} Disabling passwords without a working SSH key ${C_BOLD}will lock you out${C_RESET}."
                     if [[ $ed25519_key_count -eq 0 ]]; then
@@ -933,11 +933,14 @@ configure_ssh_hardening() {
                     fi
                      ;;
                 "UsePAM")
-                    echo "Explanation: PAM enables integration with system authentication policies (like 2FA, password complexity, etc.). Recommended to keep 'yes'." ;;
+                    echo "Explanation: PAM enables integration with system authentication policies (like 2FA, password complexity, etc.). Recommended to keep 'yes'."
+                    ;;
                 "X11Forwarding")
-                    echo "Explanation: Disabling X11 forwarding reduces the attack surface if graphical applications are not tunneled over SSH." ;;
+                    echo "Explanation: Disabling X11 forwarding reduces the attack surface if graphical applications are not tunneled over SSH."
+                    ;;
                 "PrintLastLog")
-                    echo "Explanation: Displaying the last login time and location helps identify unauthorized access attempts upon login." ;;
+                    echo "Explanation: Displaying the last login time and location helps identify unauthorized access attempts upon login."
+                    ;;
             esac
 
             # Ask user if they want to apply the change
@@ -1109,7 +1112,7 @@ configure_fail2ban() {
         success "Jail '[$ssh_jail_name]' is enabled in '$jail_local'."
     else
         warn "Jail '[$ssh_jail_name]' is not enabled in '$jail_local'."
-         if ask_yes_no "Enable jail '[$ssh_jail_name]' now?" "y"; then
+        if ask_yes_no "Enable jail '[$ssh_jail_name]' now?" "y"; then
              backup_file "$jail_local" || return 1
              # Simple awk script to enable the jail
              local temp_jail_awk; temp_jail_awk=$(mktemp /tmp/f2b-jail.XXXXXX)
@@ -1118,12 +1121,10 @@ configure_fail2ban() {
                 $0 == jail { in_section = 1; print; next; }
                 /^\s*\[/ && NR > 1 && in_section { # Leaving target section
                     if (!enabled_updated) { print "enabled = true"; } # Add if not found/updated
-                    in_section = 0;
-                    enabled_updated = 1; # Prevent adding again at END
+                    in_section = 0; enabled_updated = 1; # Prevent adding again at END
                 }
                 in_section && /^\s*#?\s*enabled\s*=/ { # Found existing enabled line
-                    print "enabled = true";
-                    enabled_updated = 1;
+                    print "enabled = true"; enabled_updated = 1;
                     next; # Skip printing old line
                 }
                 { print } # Print other lines
@@ -1205,15 +1206,13 @@ configure_fail2ban() {
                 /^\s*\[DEFAULT\]/ { print; in_default_section=1; next } # Print section header and mark entry
                 /^\s*\[/ && NR > 1 && in_default_section { # Leaving DEFAULT section
                     if (!added) { print "ignoreip = " ignorelist }; # Add if not found within section
-                    in_default_section=0;
-                    added=1; # Prevent adding again at END
+                    in_default_section=0; added=1; # Prevent adding again at END
                     print; # Print the new section header
                     next;
                 }
                 in_default_section && /^\s*#?\s*ignoreip\s*=/ { # Found existing ignoreip line start
                     if (!added) { # Replace only the first occurrence in section
-                       print "ignoreip = " ignorelist;
-                       added=1;
+                       print "ignoreip = " ignorelist; added=1;
                     }
                     # Skip the rest of the old definition (potentially multi-line)
                     while (getline > 0 && $0 ~ /^[[:space:]]+/) { next }
@@ -1221,7 +1220,7 @@ configure_fail2ban() {
                     if ( $0 !~ /^\s*([#;]|$)/ && $0 !~ /^\s*\[/ ) { print }
                     # Handle if the breaking line was a new section header
                     if ( $0 ~ /^\s*\[/ ) {
-                         if (!added && in_default_section) { print "ignoreip = " ignorelist }; # Add if missed
+                           if (!added && in_default_section) { print "ignoreip = " ignorelist }; # Add if missed
                          in_default_section=0; added=1; print;
                      }
                     next;
@@ -1494,7 +1493,7 @@ get_ufw_allowed_ports() {
 
                 # Format: 22/tcp
                 if (to_field ~ /^[0-9]+\/(tcp|udp)$/) {
-                    split(to_field, parts, "/")
+                     split(to_field, parts, "/")
                     port = parts[1]
                     if (port > 0 && port < 65536) print port
                 }
@@ -1507,7 +1506,7 @@ get_ufw_allowed_ports() {
                 else if (to_field ~ /^[a-zA-Z]+\/(tcp|udp)$/) {
                     # Service names like "ssh/tcp" are handled here
                     # You could use getent services to resolve these if needed
-                    debug "Service name found: " to_field
+                     debug "Service name found: " to_field
                 }
             }
         }
@@ -1552,11 +1551,11 @@ get_listening_ports() {
                     split($i, addr_parts, ":")
                     # Get the last part (port number)
                     port = addr_parts[length(addr_parts)]
-                    # If port contains % (interface), remove it
+                     # If port contains % (interface), remove it
                     sub(/%.*$/, "", port)
                     # Validate port is numeric and in valid range
                     if (port ~ /^[0-9]+$/ && port > 0 && port < 65536) {
-                        print port ",tcp"
+                         print port ",tcp"
                     }
                 }
             }
@@ -1571,11 +1570,11 @@ get_listening_ports() {
             # Extract port from the Local Address:Port column (usually $4 or $5)
             for (i = 1; i <= NF; i++) {
                 if ($i ~ /:/) {  # Find field containing colon (address:port format)
-                    split($i, addr_parts, ":")
+                     split($i, addr_parts, ":")
                     # Get the last part (port number)
                     port = addr_parts[length(addr_parts)]
                     # If port contains % (interface), remove it
-                    sub(/%.*$/, "", port)
+                     sub(/%.*$/, "", port)
                     # Validate port is numeric and in valid range
                     if (port ~ /^[0-9]+$/ && port > 0 && port < 65536) {
                         print port ",udp"
@@ -1787,7 +1786,7 @@ configure_ufw() {
             ports_to_allow+=("$port/$proto")
             success "Port $port/$proto -> Marked for ALLOW."
         else
-            warn "Port $port/$proto -> Marked for DENY (no rule will be added)."
+             warn "Port $port/$proto -> Marked for DENY (no rule will be added)."
             ports_to_deny+=("$port/$proto") # Track denials for summary
         fi
     done
@@ -1801,10 +1800,10 @@ configure_ufw() {
             local port_num="${rule%%/*}"
 
             # Add comment to identify rules added by the script
-            local comment="Allowed by security script v2.8.4" # Update version in comment
+            local comment="Allowed by security script v2.8.4+ClamAV" # Update version in comment
 
             # Check if port is already allowed
-            if [[ ! -v ufw_allowed_ports_map["$port_num"] ]]; then
+             if [[ ! -v ufw_allowed_ports_map["$port_num"] ]]; then
                 if ufw insert 1 allow "$rule" comment "$comment"; then
                     success "Rule 'ALLOW $rule' added."
                     log_change "UFW_RULE_ADDED:ALLOW $rule"
@@ -1898,7 +1897,7 @@ configure_journald() {
                            echo "" >> "$config_file" # Ensure newline
                            echo "[Journal]" >> "$config_file"
                       fi
-                      echo "$param_key=$desired_value" >> "$config_file"
+                       echo "$param_key=$desired_value" >> "$config_file"
                  fi
             fi
             success "$param_key set to '$desired_value' in '$config_file'."
@@ -1922,8 +1921,171 @@ configure_journald() {
     echo
 }
 
+# ***********************************************************
+# *** NEUER ABSCHNITT: ClamAV Konfiguration                 ***
+# ***********************************************************
+# Section 7: ClamAV Installation and Configuration (REVISED v3)
+configure_clamav() {
+    info "${C_BOLD}7. ClamAV Antivirus Setup${C_RESET}"
+    if ! ask_yes_no "Execute this step (ClamAV Setup)?" "y"; then
+        info "Step skipped."; echo; return 0
+    fi
+
+    local clamav_pkg="clamav" clamav_daemon_pkg="clamav-daemon"
+    local freshclam_service="clamav-freshclam" clamd_service="clamav-daemon"
+    local clamav_db_dir="/var/lib/clamav"
+    local main_db_file="${clamav_db_dir}/main.cvd" # Check for the most common file names
+    local daily_db_file="${clamav_db_dir}/daily.cvd"
+    local bytecode_db_file="${clamav_db_dir}/bytecode.cvd" # Often needed too
+    local initial_freshclam_success=false # Track if initial definition download worked
+
+    info "Checking ClamAV package status..."
+    local install_clamav=false
+    if ! is_package_installed "$clamav_pkg"; then warn "'$clamav_pkg' not installed."; install_clamav=true; else success "'$clamav_pkg' is installed."; fi
+    if ! is_package_installed "$clamav_daemon_pkg"; then warn "'$clamav_daemon_pkg' not installed."; install_clamav=true; else success "'$clamav_daemon_pkg' is installed."; fi
+
+    if $install_clamav; then
+        if ask_yes_no "Install ClamAV packages ($clamav_pkg, $clamav_daemon_pkg)?" "y"; then
+            if ! $SCRIPT_APT_UPDATED; then info "Running 'apt update'..."; apt update && SCRIPT_APT_UPDATED=true || { error "'apt update' failed."; return 1; }; fi
+            local pkgs_to_install=""
+            if ! is_package_installed "$clamav_pkg"; then pkgs_to_install+="$clamav_pkg "; fi
+            if ! is_package_installed "$clamav_daemon_pkg"; then pkgs_to_install+="$clamav_daemon_pkg "; fi
+
+            if [[ -n "$pkgs_to_install" ]]; then
+                apt install -y $pkgs_to_install && success "Packages installed." || { error "ClamAV installation failed."; return 1; }
+                [[ "$pkgs_to_install" =~ "$clamav_pkg" ]] && log_change "INSTALLED:$clamav_pkg"
+                [[ "$pkgs_to_install" =~ "$clamav_daemon_pkg" ]] && log_change "INSTALLED:$clamav_daemon_pkg"
+            else info "Required ClamAV packages already installed."; fi
+        else info "ClamAV skipped."; echo "--- Section 7 completed ---"; echo; return 0; fi
+    fi
+
+    # --- Initial Freshclam Run ---
+    info "Attempting initial ClamAV definition download..."
+    # Ensure freshclam service is stopped before manual run to avoid conflicts/locks
+    if systemctl is-active --quiet "$freshclam_service"; then
+        info "Stopping $freshclam_service temporarily for manual update..."
+        systemctl stop "$freshclam_service" || warn "Could not stop $freshclam_service. Manual update might fail."
+        sleep 2 # Give service time to stop
+    fi
+
+    if ask_yes_no "Run 'freshclam' manually now to get initial definitions (required for daemon)? This may take time." "y"; then
+        info "Running freshclam..."
+        # Run freshclam with --quiet to reduce verbose output unless debugging
+        local freshclam_cmd="freshclam"
+        [[ "$SCRIPT_DEBUG" != "true" ]] && freshclam_cmd="freshclam --quiet"
+
+        if $freshclam_cmd; then
+            success "Freshclam finished successfully."
+            log_change "COMMAND_RUN:freshclam (Initial)"
+            initial_freshclam_success=true
+            # Give filesystem a moment after successful download
+            sleep 3
+        else
+            error "Initial freshclam command failed. Check '/var/log/clamav/freshclam.log'."
+            error "ClamAV daemon ($clamd_service) likely cannot start without definitions."
+            warn "You may need to manually troubleshoot freshclam (e.g., check network, config, permissions)."
+            initial_freshclam_success=false
+        fi
+    else
+        warn "Skipped initial freshclam run. The ClamAV daemon ($clamd_service) will likely not start without definitions."
+        # Check if files already exist from a previous run even if skipped now
+        if [[ -f "$main_db_file" && -f "$daily_db_file" ]]; then
+            info "Definition files seem to exist already from a previous run."
+            initial_freshclam_success=true # Treat as success for clamd start attempt
+        fi
+    fi
+
+    # --- Configure Services ---
+
+    # Configure freshclam service for automatic future updates
+    info "Configuring '$freshclam_service' for automatic future updates..."
+    if systemctl list-unit-files | grep -q "^${freshclam_service}\.service"; then
+        local needs_freshclam_start=false needs_freshclam_enable=false
+        # Check status AFTER manual run attempt
+        if ! systemctl is-active --quiet "$freshclam_service"; then needs_freshclam_start=true; fi
+        if ! systemctl is-enabled --quiet "$freshclam_service"; then needs_freshclam_enable=true; fi
+
+        if $needs_freshclam_start; then
+            if ask_yes_no "Start '$freshclam_service' now for automatic future updates?" "y"; then
+                if systemctl start "$freshclam_service"; then success "'$freshclam_service' started."; log_change "SERVICE_STARTED:$freshclam_service"; else error "Failed to start '$freshclam_service'."; fi
+            fi
+        else success "'$freshclam_service' service seems already active (or was not stopped earlier)." ;fi
+
+        if $needs_freshclam_enable; then
+            if ask_yes_no "Enable '$freshclam_service' for startup?" "y"; then
+                if systemctl enable "$freshclam_service"; then success "'$freshclam_service' enabled."; log_change "SERVICE_ENABLED:$freshclam_service"; else error "Failed to enable '$freshclam_service'."; fi
+            fi
+        else success "'$freshclam_service' service is already enabled."; fi
+    else
+         warn "Could not find '$freshclam_service'. Automatic definition updates might rely on cron or other methods. Please verify manually."
+    fi
+
+
+    # Configure clamd service (ClamAV Daemon)
+    info "Checking status of '$clamd_service'..."
+    if systemctl list-unit-files | grep -q "^${clamd_service}\.service"; then
+        local needs_clamd_start=false needs_clamd_enable=false
+        if ! systemctl is-active --quiet "$clamd_service"; then needs_clamd_start=true; fi
+        if ! systemctl is-enabled --quiet "$clamd_service"; then needs_clamd_enable=true; fi
+
+        if $needs_clamd_start; then
+            # Only attempt to start if initial freshclam indicated success (or files existed previously)
+            if $initial_freshclam_success; then
+                # Check specifically for the required definition files using test -f
+                info "Verifying existence of required definition files..."
+                # Check for main AND daily OR their .cld alternatives
+                local definitions_ok=false
+                if [[ -f "$main_db_file" && -f "$daily_db_file" ]]; then
+                    definitions_ok=true
+                    success "Required definition files ($main_db_file, $daily_db_file) found."
+                elif [[ -f "${clamav_db_dir}/main.cld" && -f "${clamav_db_dir}/daily.cld" ]]; then
+                    definitions_ok=true
+                    success "Required definition files (main.cld, daily.cld) found."
+                else
+                    error "Required definition files (main/daily .cvd or .cld) not found in '$clamav_db_dir'."
+                fi
+
+                if $definitions_ok; then
+                    if ask_yes_no "Start '$clamd_service' now?" "y"; then
+                        if systemctl start "$clamd_service"; then
+                            sleep 2 # Give service time to potentially fail/log
+                            if systemctl is-active --quiet "$clamd_service"; then
+                                success "'$clamd_service' started successfully."
+                                log_change "SERVICE_STARTED:$clamd_service"
+                            else
+                                error "Failed to start '$clamd_service' or it stopped immediately. Check logs ('journalctl -u $clamd_service')."
+                            fi
+                        else
+                             error "Systemctl command to start '$clamd_service' failed. Check journalctl."
+                        fi
+                    fi
+                else
+                     warn "Cannot start '$clamd_service' because required definition files were not found."
+                fi
+            else
+                 warn "Cannot start '$clamd_service' because initial 'freshclam' failed or was skipped without existing files."
+            fi
+        else success "'$clamd_service' service is already active."; fi
+
+        if $needs_clamd_enable; then
+            if ask_yes_no "Enable '$clamd_service' for startup?" "y"; then
+                if systemctl enable "$clamd_service"; then success "'$clamd_service' enabled."; log_change "SERVICE_ENABLED:$clamd_service"; else error "Failed to enable '$clamd_service'."; fi
+            fi
+        else success "'$clamd_service' service is already enabled."; fi
+    else
+         warn "Could not find '$clamd_service'. The daemon might not be installed or managed by systemd."
+    fi
+
+    echo "--- Section 7 completed ---"
+    echo
+}
+# ***********************************************************
+# *** ENDE DES NEUEN ABSCHNITTS                             ***
+# ***********************************************************
+
+
 # --- Main Script Execution ---
-echo "=== Interactive Linux Server Security Script (V2.8.4) ==="
+echo "=== Interactive Linux Server Security Script (V2.8.4+ClamAV) ==="
 echo "Checks and configures security settings."
 echo "Log file: $SCRIPT_LOG_FILE"
 echo "Backups: Files ending with '$BACKUP_SUFFIX'"
@@ -1960,7 +2122,7 @@ if ! touch "$SCRIPT_LOG_FILE" &>/dev/null; then
          exit 1
     fi
 fi
-log_change "SCRIPT_STARTED Version=2.8.4"
+log_change "SCRIPT_STARTED Version=2.8.4+ClamAV"
 # Determine SSH Service Name only once here
 if [[ -z "$SSH_SERVICE" ]]; then # Check if detection failed earlier
     warn "Could not definitively determine SSH service name, assuming 'sshd'."
@@ -1981,6 +2143,7 @@ configure_fail2ban # Run this before SSHGuard if both used
 configure_sshguard
 configure_ufw
 configure_journald # Add calls for other functions
+configure_clamav # NEUER AUFRUF
 
 # --- Optional Uninstall/Cleanup ---
 # info "Optional Uninstall Steps:" # Commented out for now
