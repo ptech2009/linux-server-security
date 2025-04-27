@@ -1802,7 +1802,7 @@ configure_ufw() {
             local port_num="${rule%%/*}"
 
             # Add comment to identify rules added by the script
-            local comment="Allowed by security script v2.8.12+ClamAV" # Update version in comment
+            local comment="Allowed by security script v1.6.2"
 
             # Check if port is already allowed
              if [[ ! -v ufw_allowed_ports_map["$port_num"] ]]; then #
@@ -2087,7 +2087,7 @@ configure_clamav() {
 
 
 # --- Main Script Execution ---
-echo "=== Interactive Linux Server Security Script (V2.8.12+ClamAV) ===" # Version Bump
+echo "=== Interactive Linux Server Security Script v1.6.2 ===" # Version Bump
 echo "Checks and configures security settings."
 echo "Log file: $SCRIPT_LOG_FILE" #
 echo "Backups: Files ending with '$BACKUP_SUFFIX'" #
