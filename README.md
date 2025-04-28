@@ -11,6 +11,11 @@ The script offers a wide range of automation tools and security mechanisms:
 - Ensures secure parameters like `PasswordAuthentication`, `PermitRootLogin`, `AllowUsers`, and others are configured.
 - **Optional SSH key generation:** Creates an Ed25519 keypair and adds the public key to `authorized_keys`.
 
+✅ Google 2FA (Two-Factor Authentication) Integration
+- Installs and configures Google Authenticator (libpam-google-authenticator).
+- Provides interactive setup: QR code and backup codes displayed directly in terminal.
+- Automatically adjusts PAM and SSHD configuration for secure 2FA login.
+
 ### ✅ Fail2ban Setup & Configuration
 - **Automatic config validation:** Scans and adjusts Fail2ban files to prevent brute-force attacks (especially on SSH).
 - **Interactive jail customization:** Guided prompts help set up or modify the local `jail.conf` or `jail.local` interactively.
