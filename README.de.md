@@ -106,7 +106,6 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 
 ## Installation und Anwendung
 
-1. Repository klonen:
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
