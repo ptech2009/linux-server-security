@@ -60,7 +60,7 @@ The script offers a wide range of automation tools and security mechanisms:
 - Perfect for safe reviews, testing environments, CI/CD pipelines, or validation runs.
 - Activated via simple command-line option:  
   ```bash
-  sudo ./security_script.sh --dry-run
+  sudo ./Linux-server-security_script.sh --dry-run
   ```
 ## ✨ Feature Matrix: Comparison to Other Hardening Scripts
 
