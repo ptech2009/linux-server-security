@@ -55,6 +55,34 @@ The script offers a wide range of automation tools and security mechanisms:
 - Uses confirmation prompts like `ask_yes_no` to avoid unintended changes.
 - Logs every modification in detail (`/var/log/security_script_changes.log`) to ensure full traceability.
 
+## ✨ Feature Matrix: Comparison to Other Hardening Scripts
+
+| Feature                                | linux-server-security (this project) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
+|:---------------------------------------|:-------------------------------------|:------------------------------|:------------------------|:-----------------------------|
+| **Interactive user guidance**         | ✅ Yes                               | 🔶 Partially                  | ❌ No                    | ❌ No                       |
+| **Idempotent (safe for repeated runs)** | ✅ Yes                               | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
+| **Automatic SSH hardening (server + client settings)** | ✅ Yes      | ✅ Yes                        | ✅ Yes                   | ✅ Yes                      |
+| **Optional integrated Google 2FA protection** | ✅ Yes                               | ❌ No                       | ❌ No                    | ❌ No                      |
+| **sysctl.conf security optimizations** | ✅ Yes (own `/etc/sysctl.d/` file)    | 🔶 Minimal                    | 🔶 Partially checks     | ✅ Full (via Ansible)      |
+| **Firewall configuration (UFW)**       | ✅ Yes                               | 🔶 Partially (iptables only)   | 🔶 Partially             | ✅ Yes                      |
+| **Automatic updates (unattended-upgrades)** | ✅ Yes                               | 🔶 Partially                  | ❌ No                    | ✅ Yes                      |
+| **Fail2Ban or SSHGuard integration**   | ✅ Yes (optional)                    | ✅ Yes                        | ❌ No                    | ✅ Yes                      |
+| **ClamAV antivirus integration (optional)** | ✅ Yes                               | ❌ No                       | ❌ No                    | ❌ No                      |
+| **Optimized for Debian and Ubuntu**    | ✅ Yes                               | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
+| **Automatic backups for changes**      | ✅ Yes                               | ❌ No                       | ❌ No                    | 🔶 Partially               |
+| **Auditd/Compliance Focus**             | ❌ Intentionally excluded            | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
+
+---
+
+### 📢 Notes
+- This script deliberately **focuses on practical security** for **Debian and Ubuntu servers** without heavy compliance overhead.
+- Perfect for **root servers**, **VPS**, **home labs**, and **private clouds** where **fast and reliable server security** is needed.
+- Lightweight, modular, and fully interactive.
+
+---
+
+
+
 ## 🚀 Installation & Usage
 
 ```bash
@@ -65,8 +93,7 @@ sudo ./security_script.sh
 ``` 
 ⚠️ Notes
 
-  Beta status:
-    This script is currently in beta. It has been tested extensively, but further optimization is ongoing. Feedback is highly appreciated!
+  This script has been tested extensively, but further optimization is ongoing. Feedback is highly appreciated!
 
   Backups:
     While the script automatically backs up modified configs, it's still a good idea to keep separate backups before applying any critical changes.
