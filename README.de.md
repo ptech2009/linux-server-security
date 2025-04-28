@@ -83,7 +83,7 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 - Ideal für sichere Überprüfungen, Testumgebungen, CI/CD-Pipelines oder Validierungsläufe.
 - Aktivierung über eine einfache Kommandozeilenoption:  
   ```bash
-   sudo ./security_script.sh --dry-run
+   sudo ./Linux-server-security_script.sh --dry-run
   ```
 
 ## ✨ Feature-Matrix: Vergleich zu anderen Hardening-Skripten
