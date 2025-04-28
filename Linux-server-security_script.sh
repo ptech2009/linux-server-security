@@ -1,6 +1,6 @@
 #!/bin/bash
 # === Interactive Linux Server Security Script ===
-# Version: 1.6.2
+# Version: 1.6.3
 # Original Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers
 # License: Free to use, but at your own risk. NO WARRANTY.
@@ -664,7 +664,7 @@ configure_msmtp() {
 
         # Show example config and confirm
         info "--- Example Configuration ---"
-        echo -e "defaults\nport $smtp_port\ntls $smtp_tls\ntls_trust_file $smtp_trust_file\nlogfile ${user_home}/.msmtp.log\n\naccount root\nhost $smtp_host\nfrom $smtp_from\nauth on\nuser $smtp_user\npassword ********\n\naccount default : root\naliases $smtp_aliases"
+        echo -e "defaults\nport $smtp_port\ntls $smtp_tls\ntls_trust_file $smtp_trust_file\nlogfile ${user_home}/.msmtp.log\n\naccount default\nhost $smtp_host\nfrom $smtp_from\nauth on\nuser $smtp_user\npassword ********\n\naliases $smtp_aliases"
         echo "--------------------------------"
 
         if ask_yes_no "Save these settings to '$config_file_path'?" "y"; then
@@ -679,15 +679,12 @@ tls $smtp_tls
 tls_trust_file $smtp_trust_file
 logfile ${user_home}/.msmtp.log
 
-account root
+account default
 host $smtp_host
 from $smtp_from
 auth on
 user $smtp_user
 password $smtp_password
-
-# Set default account
-account default : root
 
 # Use system aliases file (optional)
 aliases $smtp_aliases
@@ -718,12 +715,22 @@ EOF
             # Send test email if mailutils is installed
             if is_package_installed "$mailutils_pkg"; then
                 if ask_yes_no "Send test email to '$smtp_from'?" "y"; then
-                    # Use timeout to prevent hanging if SMTP server is slow/unreachable
-                    if timeout 15s echo "This is a test email from the Linux Security Script." | mail -s "MSMTP Test $(date)" "$smtp_from"; then
-                        success "Test email sent (check spam folder if not received)."
+                    # If user config, run as the appropriate user
+                    if [[ "$MSMTP_CONFIG_CHOICE" == "user" ]] && [[ "$config_owner" != "$(whoami)" ]]; then
+                        # Use su to run the mail command as the appropriate user
+                        if su - "$config_owner" -c "echo 'This is a test email from the Linux Security Script.' | mail -s 'MSMTP Test $(date)' '$smtp_from'"; then
+                            success "Test email sent (check spam folder if not received)."
+                        else
+                            warn "Could not send test email. Check ${user_home}/.msmtp.log"
+                        fi
                     else
-                        warn "Could not send test email (timed out or error). Check ${user_home}/.msmtp.log"
-                    fi # <<<--- CORRECTED FI LOCATION
+                        # Direct command if running as root or the config owner
+                        if echo "This is a test email from the Linux Security Script." | mail -s "MSMTP Test $(date)" "$smtp_from"; then
+                            success "Test email sent (check spam folder if not received)."
+                        else
+                            warn "Could not send test email. Check ${user_home}/.msmtp.log"
+                        fi
+                    fi
                 fi
             else
                  warn "Package 'mailutils' not found, skipping test email."
