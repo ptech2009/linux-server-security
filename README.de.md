@@ -78,6 +78,14 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 - **Umfassendes Logging**  
   Alle Änderungen werden in `/var/log/security_script_changes.log` detailliert protokolliert.
 
+✅ **Dry-Run Modus (NEU)**
+- **Vorschau-Modus**: Simuliert die Ausführung des Skripts, ohne Änderungen am System vorzunehmen.
+- Ideal für sichere Überprüfungen, Testumgebungen, CI/CD-Pipelines oder Validierungsläufe.
+- Aktivierung über eine einfache Kommandozeilenoption:  
+  ```bash
+   sudo ./security_script.sh --dry-run
+  ```
+
 ## ✨ Feature-Matrix: Vergleich zu anderen Hardening-Skripten
 
 | Funktion                               | linux-server-security (dieses Projekt) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
