@@ -78,6 +78,32 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 - **Umfassendes Logging**  
   Alle Änderungen werden in `/var/log/security_script_changes.log` detailliert protokolliert.
 
+## ✨ Feature-Matrix: Vergleich zu anderen Hardening-Skripten
+
+| Funktion                               | linux-server-security (dieses Projekt) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
+|:---------------------------------------|:--------------------------------------|:------------------------------|:------------------------|:-----------------------------|
+| **Interaktive Benutzerführung**        | ✅ Ja                                | 🔶 Teilweise                   | ❌ Nein                 | ❌ Nein                     |
+| **Idempotent (wiederholbare Ausführung ohne Probleme)** | ✅ Ja         | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
+| **Automatisches SSH-Hardening (Server + Client)** | ✅ Ja            | ✅ Ja                        | ✅ Ja                   | ✅ Ja                      |
+| **Optionale Google 2FA Absicherung**   | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | ❌ Nein                    |
+| **sysctl.conf Sicherheitsoptimierungen** | ✅ Ja (eigene `/etc/sysctl.d/` Datei) | 🔶 Minimal                   | 🔶 Teilweise Prüfungen  | ✅ Vollständig (Ansible)  |
+| **Firewall-Konfiguration (UFW)**       | ✅ Ja                                | 🔶 Teilweise (nur iptables)    | 🔶 Teilweise             | ✅ Ja                      |
+| **Automatische Updates (unattended-upgrades)** | ✅ Ja             | 🔶 Teilweise                   | ❌ Nein                 | ✅ Ja                      |
+| **Fail2Ban oder SSHGuard Integration** | ✅ Ja (optional)                     | ✅ Ja                        | ❌ Nein                 | ✅ Ja                      |
+| **ClamAV Virenschutz Integration (optional)** | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | ❌ Nein                    |
+| **Optimiert für Debian und Ubuntu**    | ✅ Ja                                | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
+| **Automatische Backups vor Änderungen** | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | 🔶 Teilweise               |
+| **Auditd/Compliance Fokus**             | ❌ Bewusst ausgeschlossen            | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
+
+---
+
+### 📢 Hinweise
+- Dieses Skript fokussiert sich bewusst auf **praktische Serversicherheit** für **Debian- und Ubuntu-Server**, ohne übermäßigen Compliance-Aufwand.
+- Ideal geeignet für **Root-Server**, **VPS**, **Home Labs** und **private Clouds**.
+- **Leichtgewichtig**, **modular** und **voll interaktiv**.
+
+---
+
 ## Installation und Anwendung
 
 1. Repository klonen:
@@ -96,8 +122,8 @@ Skript mit Administratorrechten starten:
 
 Hinweise
 
-   Beta-Status:
-    Dieses Skript befindet sich im Beta-Stadium. Es wurde eingehend getestet, doch Optimierungen sind geplant. Feedback ist sehr willkommen!
+
+  Das Skript wurde eingehend getestet, doch weitere Optimierungen sind geplant. Feedback ist sehr willkommen!
 
    Backup:
     Das Skript erstellt Sicherungen automatisch, dennoch empfiehlt sich ein separates Backup vor kritischen Änderungen.
