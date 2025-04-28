@@ -1,6 +1,6 @@
 #!/bin/bash
 # === Interactive Linux Server Security Script ===
-# Version: 1.6.3
+# Version: 1.6.4
 # Original Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers
 # License: Free to use, but at your own risk. NO WARRANTY.
@@ -193,6 +193,176 @@ is_fail2ban_jail_enabled() {
 
 
 # --- Function definitions for individual sections ---
+
+
+# --- Google 2FA ---
+
+# --- Google Authenticator 2FA ---
+configure_google_2fa() {
+    info "${C_BOLD}5. Configure Google Authenticator 2FA${C_RESET}"
+    if ! ask_yes_no "Execute Google Authenticator setup?" "y"; then
+        info "Skipping Google Authenticator."; echo; return 0
+    fi
+
+    # Ziel-User ermitteln (SUDO_USER oder aktueller User)
+    local target_user=${SUDO_USER:-$(whoami)}
+    local user_home
+    user_home=$(eval echo "~$target_user")
+
+    info "Setting up 2FA for user: ${target_user}"
+
+    # Prüfen, ob bereits konfiguriert
+    if [[ -f "${user_home}/.google_authenticator" ]]; then
+        if ! ask_yes_no "Google Authenticator already configured for ${target_user}. Reconfigure?" "n"; then
+            info "Keeping existing configuration."; echo; return 0
+        fi
+    fi
+
+    # 1) Paket installieren
+    local pkg="libpam-google-authenticator"
+    if ! is_package_installed "$pkg"; then
+        info "Installing $pkg..."
+        if apt-get install -y "$pkg"; then
+            log_change "INSTALLED:$pkg"
+            success "$pkg installed successfully."
+        else
+            error "Failed to install $pkg"
+            return 1
+        fi
+    else
+        success "$pkg already installed."
+    fi
+
+    # 2) Interaktive Konfiguration mit Anleitung für den Benutzer
+    info "Now initializing Google Authenticator for ${target_user}..."
+    echo "- You'll need to scan a QR code with your Google Authenticator app"
+    echo "- Save your emergency scratch codes in a secure location"
+    echo "- Answer 'y' to the following security-related questions"
+    echo
+
+    # Eigentliche Konfiguration - KORRIGIERT: Entweder -w ODER -W verwenden, nicht beides
+    if ! sudo -u "$target_user" google-authenticator -t -f -d -r 3 -R 30 -w 17; then
+        error "Google Authenticator setup failed for user ${target_user}."
+        return 1
+    fi
+
+    success "Google Authenticator initialized for ${target_user}. Scan the QR code with your authenticator app."
+    echo "IMPORTANT: Note down your emergency scratch codes!"
+    echo
+
+    # 3) PAM-Konfiguration (/etc/pam.d/sshd) anpassen
+    local pam_file="/etc/pam.d/sshd"
+    info "Configuring PAM for SSH..."
+
+    if [[ ! -f "$pam_file" ]]; then
+        error "PAM configuration file $pam_file not found!"
+        return 1
+    fi
+
+    backup_file "$pam_file" || return 1
+
+    # common-auth auskommentieren, falls noch nicht geschehen
+    if grep -q "^@include common-auth" "$pam_file"; then
+        sed -i 's/^@include common-auth/#@include common-auth/' "$pam_file"
+        log_change "MODIFIED:$pam_file (Commented out common-auth)"
+    fi
+
+    # Google-Auth-Modul eintragen, falls noch nicht vorhanden
+    if ! grep -q "pam_google_authenticator.so" "$pam_file"; then
+        echo "auth required pam_google_authenticator.so nullok" >> "$pam_file"
+        log_change "MODIFIED:$pam_file (Added Google Authenticator PAM)"
+        success "Updated $pam_file for Google Authenticator."
+    else
+        # Sicherstellen, dass die nullok Option vorhanden ist
+        if ! grep -q "pam_google_authenticator.so nullok" "$pam_file"; then
+            sed -i 's/pam_google_authenticator.so/pam_google_authenticator.so nullok/' "$pam_file"
+            log_change "MODIFIED:$pam_file (Added nullok option to Google Authenticator PAM)"
+        fi
+        success "$pam_file already contains Google Authenticator config."
+    fi
+
+    # 4) SSHD-Config (/etc/ssh/sshd_config) anpassen
+    local ssh_conf="/etc/ssh/sshd_config"
+    info "Configuring SSH daemon..."
+
+    if [[ ! -f "$ssh_conf" ]]; then
+        error "SSH configuration file $ssh_conf not found!"
+        return 1
+    fi
+
+    backup_file "$ssh_conf" || return 1
+
+    # ChallengeResponseAuthentication und KbdInteractiveAuthentication aktivieren
+    if grep -q "^#\?ChallengeResponseAuthentication" "$ssh_conf"; then
+        sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$ssh_conf"
+        log_change "MODIFIED:$ssh_conf (Enabled ChallengeResponseAuthentication)"
+    else
+        echo "ChallengeResponseAuthentication yes" >> "$ssh_conf"
+        log_change "MODIFIED:$ssh_conf (Added ChallengeResponseAuthentication)"
+    fi
+
+    if grep -q "^#\?KbdInteractiveAuthentication" "$ssh_conf"; then
+        sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' "$ssh_conf"
+        log_change "MODIFIED:$ssh_conf (Enabled KbdInteractiveAuthentication)"
+    else
+        echo "KbdInteractiveAuthentication yes" >> "$ssh_conf"
+        log_change "MODIFIED:$ssh_conf (Added KbdInteractiveAuthentication)"
+    fi
+
+    # AuthenticationMethods konfigurieren
+    if grep -q "^AuthenticationMethods" "$ssh_conf"; then
+        # Prüfen, ob keyboard-interactive bereits konfiguriert ist
+        if ! grep -q "keyboard-interactive" "$ssh_conf"; then
+            sed -i '/^AuthenticationMethods/s/$/,keyboard-interactive/' "$ssh_conf"
+            log_change "MODIFIED:$ssh_conf (Added keyboard-interactive to AuthenticationMethods)"
+        fi
+    else
+        echo "AuthenticationMethods publickey,keyboard-interactive" >> "$ssh_conf"
+        log_change "MODIFIED:$ssh_conf (Added AuthenticationMethods)"
+    fi
+
+    success "Updated $ssh_conf for Google Authenticator."
+
+    # 5) SSH neu starten
+    local ssh_services=("ssh" "sshd")
+    local restart_success=false
+
+    info "Restarting SSH service..."
+    for service in "${ssh_services[@]}"; do
+        if systemctl is-active --quiet "$service"; then
+            if systemctl restart "$service"; then
+                success "Service $service restarted successfully."
+                restart_success=true
+                break
+            fi
+        fi
+    done
+
+    if ! $restart_success; then
+        # Fallback: Versuche SSH_SERVICE aus vorheriger Konfiguration
+        if [ -n "$SSH_SERVICE" ] && systemctl restart "$SSH_SERVICE"; then
+            success "Service $SSH_SERVICE restarted successfully."
+        else
+            warning "Could not determine the correct SSH service to restart. Please restart SSH manually with:"
+            echo "sudo systemctl restart ssh.service"
+        fi
+    fi
+
+    echo
+    info "--- Google Authenticator setup completed ---"
+    echo
+    info "${C_BOLD}IMPORTANT NOTES:${C_RESET}"
+    echo "1. Test the new login in a separate SSH session before closing this one!"
+    echo "2. Make sure your authenticator app shows correct codes."
+    echo "3. Keep your emergency scratch codes in a safe place."
+    echo
+
+    return 0
+}
+# --- End of Google Authenticator 2FA ---
+
+# --- End of Google 2FA ---
+
 
 configure_ssh_key_and_users() {
     info "${C_BOLD}1. Create SSH Key Pair (Ed25519)${C_RESET}"
@@ -2181,6 +2351,7 @@ info "Using SSH Service Name: $SSH_SERVICE"
 SCRIPT_APT_UPDATED=false
 
 configure_ssh_key_and_users
+configure_google_2fa
 configure_unattended_upgrades
 configure_msmtp
 configure_ssh_hardening
