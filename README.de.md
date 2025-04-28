@@ -108,17 +108,11 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 
 1. Repository klonen:
 ```bash
-git clone https://github.com/DeinBenutzername/linux-server-security.git
+git clone https://github.com/ptech2009/linux-server-security.git
+cd linux-server-security
+chmod +x linux_server_security_script.sh
+sudo ./linux_server_security_script.sh
 ```
-
-In das Projektverzeichnis wechseln und das Skript ausführbar machen:
-
-    cd linux-server-security
-    chmod +x security_script.sh
-
-Skript mit Administratorrechten starten:
-
-    sudo ./security_script.sh
 
 Hinweise
 
