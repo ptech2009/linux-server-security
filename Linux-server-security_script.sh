@@ -1,4 +1,8 @@
 #!/bin/bash
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: This script must be run as root!" >&2
+    exit 1
+fi
 # === Interactive Linux Server Security Script ===
 # Version: 1.6.4
 # Original Author: Paul Schumacher
