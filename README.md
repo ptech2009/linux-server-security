@@ -86,10 +86,10 @@ The script offers a wide range of automation tools and security mechanisms:
 ## 🚀 Installation & Usage
 
 ```bash
-git clone https://github.com/YourUsername/linux-server-security.git
+git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x security_script.sh
-sudo ./security_script.sh
+chmod +x linux_server_security_script.sh
+sudo ./linux_server_security_script.sh
 ``` 
 ⚠️ Notes
 
