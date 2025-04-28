@@ -12,6 +12,12 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 - **Automatisierte Erstellung von SSH-Schlüsselpaaren**  
   Generierung von Ed25519-Schlüsseln mit der Option, den öffentlichen Schlüssel automatisch in `authorized_keys` einzufügen.
 
+✅ Google 2FA (Zwei-Faktor-Authentifizierung) Integration
+- Installation und Konfiguration von Google Authenticator (libpam-google-authenticator).
+- Interaktives Setup: QR-Code und Backup-Codes werden direkt im Terminal angezeigt.
+- Automatische Anpassung der PAM- und SSHD-Konfiguration für einen sicheren 2FA-Login.
+
+
 ### Fail2ban Einrichtung und Konfiguration
 - **Automatisierte Konfigurationsüberprüfung**  
   Anpassung der Fail2ban-Konfigurationsdateien zur effektiven Verhinderung von Brute-Force-Angriffen (insbesondere bei SSH).
