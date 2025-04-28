@@ -55,6 +55,13 @@ The script offers a wide range of automation tools and security mechanisms:
 - Uses confirmation prompts like `ask_yes_no` to avoid unintended changes.
 - Logs every modification in detail (`/var/log/security_script_changes.log`) to ensure full traceability.
 
+✅ **Dry-Run Mode (NEW)**
+- **Preview Mode**: Simulate the script execution without making any changes to the system.
+- Perfect for safe reviews, testing environments, CI/CD pipelines, or validation runs.
+- Activated via simple command-line option:  
+  ```bash
+  sudo ./security_script.sh --dry-run
+  ```
 ## ✨ Feature Matrix: Comparison to Other Hardening Scripts
 
 | Feature                                | linux-server-security (this project) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
