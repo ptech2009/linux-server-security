@@ -1,84 +1,81 @@
 # 🛠️ Changelog – Linux Server Security Script
 
-This document lists all significant updates, new features and fixes for the `linux-server-security` project.  
 Dieses Dokument enthält alle wesentlichen Neuerungen, Features und Bugfixes des Projekts.
 
 ---
 
-## 📦 Version 1.6.0 – April 2025
+## 📦 Version 1.7.1 – April 2025
+
+### ✨ English
+#### Bugfixes
+- Fixed a critical logic error in the **unattended-upgrades** configuration function:
+  - Corrected handling of parameter and origin matching.
+  - Ensured reliable activation of security and update repositories.
+
+#### New Features
+- Modular refactoring for better structure and maintainability.
+- `SCRIPT_DEBUG=true` enables detailed debug logging.
+- Color-coded output: `info`, `warn`, `error`, `success`, `debug`.
+- Automatic detection of SSH service (`ssh` or `sshd`).
+- Improved SSH key detection (Ed25519 support).
+- Input validation for email addresses, port numbers and boolean inputs.
+- Only one `apt update` per run to avoid redundancy.
+- Interactive `msmtp` setup (user-wide or system-wide).
+- `mailutils` now optional; test email is timeout-protected.
+- New functions for inspecting unattended-upgrades:
+  - `is_pattern_active`, `is_uu_param_true`.
+- **ClamAV Antivirus Integration**:
+  - Installs `clamav` and `clamav-daemon`.
+  - Supports manual or quiet-mode `freshclam` update.
+  - Configures `clamav-freshclam` service for auto updates.
+  - Verifies signature files and optionally starts/enables `clamav-daemon`.
+
+#### Security & Reliability
+- Improved config file backup and restore logic.
+- Secure passphrase input with confirmation.
+- Enhanced `sshd_config` hardening:
+  - `AllowUsers`, `PermitRootLogin`, `PasswordAuthentication`.
+- All changes are logged to `/var/log/security_script_changes.log`.
+
+#### Logic & Structure
+- Uses associative arrays for port handling (e.g., UFW).
+- SSH audit via `sshd -T -C`.
+- Logs file creation/modification steps.
 
 ---
 
-## ✨ English:
+### 🇩🇪 Deutsch
+#### Bugfixes
+- Kritischer Logikfehler in der **unattended-upgrades**-Funktion behoben:
+  - Korrekte Behandlung von Parametern und Ursprungsmustern.
+  - Zuverlässige Aktivierung von Security- und Update-Repositories sichergestellt.
 
-### Bugfix
-- The UFW port logic has been adapted so that only numerical port values are now extracted and compared.
+#### Neue Features
+- Refaktorisierung in modulare Struktur (bessere Wartbarkeit).
+- `SCRIPT_DEBUG=true` für erweitertes Logging.
+- Farbcodierte Ausgabe: `info`, `warn`, `error`, `success`, `debug`.
+- Automatische Erkennung des SSH-Dienstes (`ssh` oder `sshd`).
+- Verbesserte SSH-Schlüsselerkennung (Ed25519).
+- Validierung für E-Mail-Adressen, Ports und Boolesche Werte.
+- Nur ein `apt update` pro Lauf (keine Duplikate mehr).
+- Interaktives `msmtp`-Setup (benutzer- oder systemweit).
+- `mailutils` ist optional, Testmail mit Timeout-Schutz.
+- Neue Funktionen zur Analyse von unattended-upgrades:
+  - `is_pattern_active`, `is_uu_param_true`.
+- **ClamAV-Antivirus-Integration**:
+  - Installation von `clamav` und `clamav-daemon`.
+  - Initiales Update via `freshclam` (leise oder manuell).
+  - Konfiguration des `clamav-freshclam`-Dienstes.
+  - Prüfung der Signaturdateien, optionales Starten/Aktivieren von `clamav-daemon`.
 
-### New Features
-- Refactored into modular structure (improved maintainability)  
-- `SCRIPT_DEBUG=true` for extended logging  
-- Color-coded output: info, warn, error, success, debug  
-- Automatic detection of SSH service (`ssh` or `sshd`)  
-- Improved SSH key recognition (Ed25519)  
-- Input validation for email, ports and boolean values  
-- Single `apt update` per run (no duplication)  
-- Interactive `msmtp` setup (user- or system-wide)  
-- `mailutils` now optional with test email (with timeout)  
-- Functions to inspect `unattended-upgrades` (e.g. `is_pattern_active`, `is_uu_param_true`)  
-- **ClamAV Antivirus Integration:**  
-  - Installation of `clamav` and `clamav-daemon` packages  
-  - Initial manual or quiet-mode `freshclam` database update  
-  - Configuration of `clamav-freshclam` service for automatic signature download  
-  - Verification of signature files and optional start/enable of `clamav-daemon`
+#### Sicherheit & Zuverlässigkeit
+- Verbesserte Backup-/Restore-Logik für Konfigdateien.
+- Sichere Passphrase-Eingabe mit Bestätigung.
+- Verbesserte `sshd_config`-Härtung:
+  - `AllowUsers`, `PermitRootLogin`, `PasswordAuthentication`.
+- Alle Änderungen werden in `/var/log/security_script_changes.log` protokolliert.
 
-### Security & Reliability
-- Enhanced config backup/restore logic  
-- Secure passphrase handling (with confirmation)  
-- Improved `sshd_config` hardening: `AllowUsers`, `PermitRootLogin`, `PasswordAuthentication`  
-- All changes logged to `/var/log/security_script_changes.log`
-
-### Logic & Structure
-- Use of associative arrays (e.g. for UFW ports)  
-- SSH audit output via `sshd -T -C`  
-- Logging when creating or modifying configuration files
-
-### Upcoming Features
-- Interactive UFW port configuration (with rollback functionality)
-
----
-
-## 🇩🇪 Deutsch:
-
-### Bugfix
-- Die UFW-Portlogik wurde angepasst, sodass jetzt ausschließlich numerische Portwerte extrahiert und verglichen werden.
-
-### Neue Features
-- Refaktorierung mit modularer Struktur (bessere Wartbarkeit)  
-- `SCRIPT_DEBUG=true` für erweitertes Logging  
-- Farbcodiertes Logging: info, warn, error, success, debug  
-- Automatische Erkennung des SSH-Dienstes (`ssh` oder `sshd`)  
-- Verbesserte SSH-Key-Erkennung (Ed25519)  
-- Validierung für E-Mail, Ports und Boolesche Werte  
-- Apt-Update wird nur einmal pro Lauf ausgeführt  
-- Interaktives `msmtp`-Setup (benutzer- oder systemweit)  
-- `mailutils` optional mit Test-E-Mail (timeout-geschützt)  
-- Funktionen zur Prüfung von `unattended-upgrades` (`is_pattern_active`, `is_uu_param_true`)  
-- **ClamAV-Antivirus-Integration:**  
-  - Installation von `clamav` und `clamav-daemon`  
-  - Erst-Update über manuelles oder leises `freshclam`  
-  - Konfiguration des `clamav-freshclam`-Dienstes für automatische Signatur-Updates  
-  - Überprüfung der Signaturdateien und optionales Starten/Aktivieren des `clamav-daemon`-Dienstes
-
-### Sicherheit & Zuverlässigkeit
-- Verbesserte Backup- und Restore-Logik für Konfigurationsdateien  
-- Sicheres Passphrase-Handling mit Bestätigung  
-- Erweiterte `sshd_config`-Härtung: `AllowUsers`, `PermitRootLogin`, `PasswordAuthentication`  
-- Alle Änderungen werden in `/var/log/security_script_changes.log` geloggt
-
-### Struktur & Logik
-- Einsatz assoziativer Arrays (z. B. für UFW-Ports)  
-- Ausgabe effektiver SSH-Einstellungen via `sshd -T -C`  
-- Logging beim Erstellen oder Modifizieren von Konfigurationsdateien
-
-### Geplante Features
-- Interaktive UFW-Portkonfiguration (inkl. Wiederherstellungsfunktion)
+#### Struktur & Logik
+- Nutzung von assoziativen Arrays (z. B. für UFW-Ports).
+- SSH-Analyse via `sshd -T -C`.
+- Logging beim Erstellen/Ändern von Konfigurationsdateien.
