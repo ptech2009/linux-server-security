@@ -101,8 +101,8 @@ The script offers a wide range of automation tools and security mechanisms:
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x linux_server_security_script.sh
-sudo ./linux_server_security_script.sh
+chmod +x Linux-server-security_script.sh
+sudo ./sudo ./Linux-server-security_script.sh
 ``` 
 ⚠️ Notes
 
