@@ -4,12 +4,13 @@ Dieses Dokument enthält alle wesentlichen Neuerungen, Features und Bugfixes des
 
 ---
 
-## 📦 Version 1.7.1 – April 2025
+## 📦 Version 1.7.2 – April 2025
 
 ### ✨ English
 #### Bugfixes
 - Fixed a critical logic error in the **unattended-upgrades** configuration function:
   - Corrected handling of parameter and origin matching.
+  - Fixed incorrect mail address assignment for reporting.
   - Ensured reliable activation of security and update repositories.
 
 #### New Features
@@ -48,6 +49,7 @@ Dieses Dokument enthält alle wesentlichen Neuerungen, Features und Bugfixes des
 #### Bugfixes
 - Kritischer Logikfehler in der **unattended-upgrades**-Funktion behoben:
   - Korrekte Behandlung von Parametern und Ursprungsmustern.
+  - Fehlerhafte Zuordnung der E-Mail-Adresse für Reports korrigiert.
   - Zuverlässige Aktivierung von Security- und Update-Repositories sichergestellt.
 
 #### Neue Features
