@@ -64,20 +64,26 @@ The script offers a wide range of automation tools and security mechanisms:
   ```
 ## ✨ Feature Matrix: Comparison to Other Hardening Scripts
 
-| Feature                                | linux-server-security (this project) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
-|:---------------------------------------|:-------------------------------------|:------------------------------|:------------------------|:-----------------------------|
-| **Interactive user guidance**         | ✅ Yes                               | 🔶 Partially                  | ❌ No                    | ❌ No                       |
-| **Idempotent (safe for repeated runs)** | ✅ Yes                               | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
-| **Automatic SSH hardening (server + client settings)** | ✅ Yes      | ✅ Yes                        | ✅ Yes                   | ✅ Yes                      |
-| **Optional integrated Google 2FA protection** | ✅ Yes                               | ❌ No                       | ❌ No                    | ❌ No                      |
-| **sysctl.conf security optimizations** | ✅ Yes (own `/etc/sysctl.d/` file)    | 🔶 Minimal                    | 🔶 Partially checks     | ✅ Full (via Ansible)      |
-| **Firewall configuration (UFW)**       | ✅ Yes                               | 🔶 Partially (iptables only)   | 🔶 Partially             | ✅ Yes                      |
-| **Automatic updates (unattended-upgrades)** | ✅ Yes                               | 🔶 Partially                  | ❌ No                    | ✅ Yes                      |
-| **Fail2Ban or SSHGuard integration**   | ✅ Yes (optional)                    | ✅ Yes                        | ❌ No                    | ✅ Yes                      |
-| **ClamAV antivirus integration (optional)** | ✅ Yes                               | ❌ No                       | ❌ No                    | ❌ No                      |
-| **Optimized for Debian and Ubuntu**    | ✅ Yes                               | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
-| **Automatic backups for changes**      | ✅ Yes                               | ❌ No                       | ❌ No                    | 🔶 Partially               |
-| **Auditd/Compliance Focus**             | ❌ Intentionally excluded            | 🔶 Partially                  | ✅ Yes                   | ✅ Yes                      |
+| Feature | linux-server-security (this project) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
+|:--------|:-------------------------------------|:-----------------------------|:-----------------------|:---------------------------|
+| Interactive user guidance | ✅ Yes | 🔶 Partially | ❌ No | ❌ No |
+| Idempotent (safe for repeated runs) | ✅ Yes | 🔶 Partially | ✅ Yes | ✅ Yes |
+| Automatic SSH hardening (server + client settings) | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| Optional integrated Google 2FA protection | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| sysctl.conf security optimizations | ✅ Yes (own `/etc/sysctl.d/` file) | 🔶 Minimal | 🔶 Partially checks | ✅ Full (via Ansible) |
+| Firewall configuration (UFW) | ✅ Yes | 🔶 Partially (iptables only) | 🔶 Partially | ✅ Yes |
+| Automatic updates (unattended-upgrades) | ✅ Yes | 🔶 Partially | ❌ No | ✅ Yes |
+| Fail2Ban or SSHGuard integration | ✅ Yes (optional) | ✅ Yes | ❌ No | ✅ Yes |
+| ClamAV antivirus integration (optional) | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| Optimized for Debian and Ubuntu | ✅ Yes | 🔶 Partially | ✅ Yes | ✅ Yes |
+| Automatic backups for changes | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
+| Dry-Run Mode (simulate execution) | ✅ Yes (fully supported) | 🔶 Minimal (via Ansible --check) | ❌ No | 🔶 Partial (Ansible --check) |
+| Auditd/Compliance Focus | ❌ Intentionally excluded | 🔶 Partially | ✅ Yes | ✅ Yes |
+
+✅ **Legend**:
+- ✅ Yes: Full support
+- 🔶 Partially: Limited or incomplete support
+- ❌ No: Not available
 
 ---
 
