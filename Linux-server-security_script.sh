@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === Interactive Linux Server Security Script ===
-# Version: 1.7.1
+# Version: 1.7.2
 # Original Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers
 # License: Free to use, but at your own risk.
@@ -665,7 +665,7 @@ configure_ssh_key_and_users() {
 
 
 
-# --- Unattended Upgrades Functions ---
+# --- Improved Unattended Upgrades Function with Fixed Mail Configuration ---
 configure_unattended_upgrades() {
     info "${C_BOLD}2. Configure Unattended Upgrades${C_RESET}"
     if ! ask_yes_no "Execute this step (Unattended Upgrades)?" "y"; then
@@ -1054,11 +1054,21 @@ configure_unattended_upgrades() {
 
                 # Replace or add the line in the temp file
                 local new_mail_line="${mail_key} \"${new_mail}\";"
+
+                # Fix: Use a proper delimiter to avoid conflicts with the email address
+                # The issue was that the email might contain slashes or other characters that sed interprets specially
                 if grep -qE "^\s*(//\s*)?${mail_key}\s+" "$temp_file"; then
-                    # Line exists, replace it (ensures uncommented)
-                    local sed_script="s@^\s*(//\s*)?${mail_key}\s+.*@${new_mail_line}@g"
-                    sed -i -E "$sed_script" "$temp_file"
-                    success " -> Updated mail address to: $new_mail"
+                    # Line exists, create a replacement using awk instead of sed
+                    awk -v pattern="^[[:space:]]*(//[[:space:]]*)?${mail_key}[[:space:]]+.*" \
+                        -v replacement="${mail_key} \"${new_mail}\";" \
+                        'BEGIN {OFS=FS} $0 ~ pattern {$0=replacement; changed=1} {print} END {exit !changed}' \
+                        "$temp_file" > "${temp_file}.new" && mv "${temp_file}.new" "$temp_file"
+
+                    if [[ $? -eq 0 ]]; then
+                        success " -> Updated mail address to: $new_mail"
+                    else
+                        error " -> Failed to update mail address"
+                    fi
                 else
                     # Line doesn't exist, add it
                     echo "$new_mail_line" >> "$temp_file"
