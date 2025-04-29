@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # === Interactive Linux Server Security Script ===
-# Version: 1.7.0
+# Version: 1.7.1
 # Original Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers
-# License: Free to use, but at your own risk. NO WARRANTY.
+# License: Free to use, but at your own risk.
+# NO WARRANTY.
 #
 # Backup and Recovery:
 # - Before each change, a backup of the affected configuration file is created automatically.
@@ -117,6 +118,7 @@ execute_command() {
 
 ask_yes_no() {
     local question="$1" default="$2" answer
+
     while true; do
         if [[ "$default" == "y" ]]; then
             read -p "$question [Y/n]: " answer
@@ -235,7 +237,8 @@ get_config_file_sshd_setting() {
     if [[ -f "$config_file" ]]; then
         # Grep for uncommented line, case-insensitive, get last match, extract value
         grep -iE "^\s*${parameter}\s+" "$config_file" | \
-        tail -n 1 | awk '{print $2}'
+        tail -n 1 | \
+        awk '{print $2}'
     else
         echo "config_not_found"
     fi
@@ -281,7 +284,8 @@ is_fail2ban_jail_enabled() {
 configure_google_2fa() {
     info "${C_BOLD}5. Configure Google Authenticator 2FA${C_RESET}"
     if ! ask_yes_no "Execute Google Authenticator setup?" "y"; then
-        info "Skipping Google Authenticator."; echo; return 0
+        info "Skipping Google Authenticator."; echo;
+        return 0
     fi
 
     local target_user=${SUDO_USER:-$(whoami)}
@@ -292,7 +296,8 @@ configure_google_2fa() {
 
     if [[ -f "${user_home}/.google_authenticator" ]]; then
         if ! ask_yes_no "Google Authenticator already configured for ${target_user}. Reconfigure?" "n"; then
-            info "Keeping existing configuration."; echo; return 0
+            info "Keeping existing configuration."; echo;
+            return 0
         fi
         # DRY-RUN Handling: If reconfiguring, note the potential removal/overwrite
         if $DRY_RUN; then
@@ -488,7 +493,7 @@ configure_google_2fa() {
                         if $ssh_conf_changed; then restore_file "$ssh_conf"; fi
                         # Try restarting again after restore
                         execute_command "SERVICE_RESTARTED:$service (after 2FA restore)" "systemctl try-restart \"$service\""
-                    fi
+                    fi # <<< This is the corrected closing fi for the 'if ! $DRY_RUN' block
                     # Even if restore fails, we should indicate the main failure
                     restart_success=false # Ensure it's marked as failed
                     break # Stop trying other service names
@@ -521,7 +526,8 @@ configure_google_2fa() {
 configure_ssh_key_and_users() {
     info "${C_BOLD}1. Create SSH Key Pair (Ed25519)${C_RESET}"
     if ! ask_yes_no "Execute this step (SSH Key)?" "y"; then
-        info "Step skipped."; echo; return 0
+        info "Step skipped."; echo;
+        return 0
     fi
 
     local current_user
@@ -560,7 +566,8 @@ configure_ssh_key_and_users() {
         if [[ -f "$key_path" || -f "$pub_key_path" ]]; then
              warn "Key file '$key_path' or '$pub_key_path' already exists."
              if ! ask_yes_no "Overwrite existing key files?" "n"; then
-                  info "Skipping key generation."; echo "--- Section 1 completed ---"; echo; return 0
+                  info "Skipping key generation.";
+                  echo "--- Section 1 completed ---"; echo; return 0
              fi
              # DRY-RUN Handling: Note potential overwrite
              if $DRY_RUN; then
@@ -595,12 +602,10 @@ configure_ssh_key_and_users() {
             dry_run_echo "chmod 644 \"$pub_key_path\""
             dry_run_echo "chown \"$current_user\":\"$current_user\" \"$key_path\" \"$pub_key_path\""
             success "DRY-RUN: Simulated SSH key generation for '$key_path'."
-
             # Simulate adding to authorized_keys
             dry_run_echo "Check/Create $authorized_keys_path"
             dry_run_echo "Append content of $pub_key_path to $authorized_keys_path"
             success "DRY-RUN: Simulated adding public key to '$authorized_keys_path'."
-
         else # Actual execution
             if eval "$ssh_keygen_cmd"; then
                 success "SSH key pair '${key_path}' created."
@@ -608,7 +613,8 @@ configure_ssh_key_and_users() {
                 chmod 600 "$key_path" && \
                 chmod 644 "$pub_key_path" && \
                 chown "$current_user":"$current_user" "$key_path" "$pub_key_path" || \
-                  { error "Failed to set permissions on key files."; rm -f "$key_path" "$pub_key_path"; return 1; } # Cleanup on perm error
+                  { error "Failed to set permissions on key files.";
+                  rm -f "$key_path" "$pub_key_path"; return 1; } # Cleanup on perm error
                 log_change "SSH_KEY_GENERATED:${key_path}"
 
                 # Display Private Key
@@ -622,7 +628,8 @@ configure_ssh_key_and_users() {
                 if ! sudo -u "$current_user" test -f "$authorized_keys_path"; then
                      sudo -u "$current_user" touch "$authorized_keys_path" && \
                      sudo -u "$current_user" chmod 600 "$authorized_keys_path" || \
-                       { error "Failed to create or set permissions on '$authorized_keys_path'."; return 1; }
+                       { error "Failed to create or set permissions on '$authorized_keys_path'.";
+                       return 1; }
                      info "Created '$authorized_keys_path'."
                      log_change "ADDED_FILE:$authorized_keys_path"
                 fi
@@ -647,7 +654,6 @@ configure_ssh_key_and_users() {
                  echo; info "Public key file location: $pub_key_path"
                  info "${C_YELLOW}Reminder:${C_RESET} Add the public key manually to ~/.ssh/authorized_keys on target servers."
                  [[ -n "$passphrase" ]] && warn "Remember to store the passphrase securely!"
-
             else
                 error "Error during key creation (as '$current_user')."
             fi
@@ -658,6 +664,7 @@ configure_ssh_key_and_users() {
 # --- End SSH Key and Users ---
 
 
+
 # --- Unattended Upgrades Functions ---
 configure_unattended_upgrades() {
     info "${C_BOLD}2. Configure Unattended Upgrades${C_RESET}"
@@ -665,155 +672,453 @@ configure_unattended_upgrades() {
         info "Step skipped."; echo; return 0
     fi
 
+    # --- Variables ---
     local pkg="unattended-upgrades"
     local config_file="/etc/apt/apt.conf.d/50unattended-upgrades"
     local periodic_config_file="/etc/apt/apt.conf.d/20auto-upgrades"
+    local distro_id distro_codename
+    local changes_made=false # Track if any change was actually applied to the target file
+    local temp_file
 
-    # Check/Install package
+    # --- Get Distro Info ---
+    # (Uses lsb_release or /etc/os-release to find distro ID and codename)
+    if command -v lsb_release &>/dev/null; then
+        distro_id=$(lsb_release -is)
+        distro_codename=$(lsb_release -cs)
+    elif [[ -f /etc/os-release ]]; then
+        distro_id=$(grep '^ID=' /etc/os-release | cut -d= -f2 | sed 's/"//g')
+        # Capitalize first letter for consistency if needed (e.g., ubuntu -> Ubuntu)
+        distro_id="${distro_id^}"
+        distro_codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | sed 's/"//g')
+    else
+        error "Cannot determine distribution ID and codename. Please set 'distro_id' and 'distro_codename' manually."
+        return 1
+    fi
+    if [[ -z "$distro_id" || -z "$distro_codename" ]]; then
+       error "Could not determine distribution ID ('$distro_id') or codename ('$distro_codename')."
+       return 1
+    fi
+    info "Detected Distribution: $distro_id $distro_codename"
+
+
+    # --- Package Installation ---
     if ! is_package_installed "$pkg"; then
         warn "'$pkg' not installed."
         if ask_yes_no "Install '$pkg'?" "y"; then
             if ! $SCRIPT_APT_UPDATED; then
-                 info "Running 'apt update'..."
-                 # DRY-RUN Handling for apt update
-                 if execute_command "APT_UPDATE" "apt update"; then SCRIPT_APT_UPDATED=true; else error "'apt update' failed."; return 1; fi
+                info "Running 'apt update'..."
+                if ! execute_command "APT_UPDATE" "apt update"; then error "'apt update' failed."; return 1; fi
+                SCRIPT_APT_UPDATED=true
             fi
-            # DRY-RUN Handling for apt install
-            if execute_command "INSTALLED:$pkg" "apt install -y \"$pkg\""; then success "'$pkg' installed."; else error "Installation failed."; return 1; fi
-        else info "Unattended Upgrades skipped."; echo "--- Section 2 completed ---"; echo; return 0; fi
-    else success "Package '$pkg' is already installed."; fi
+            if ! execute_command "INSTALLED:$pkg" "apt install -y \"$pkg\""; then error "Installation failed."; return 1; fi
+            success "'$pkg' installed."
+            # Note: Installation itself doesn't set changes_made for the config file yet
+        else
+            info "Unattended Upgrades skipped as package installation was declined."; echo "--- Section 2 completed ---"; echo; return 0
+        fi
+    else
+        success "Package '$pkg' is already installed."
+    fi
 
-    # Configuration check (Read-only, no dry run needed here)
-    info "Checking Unattended Upgrades configuration..."
-    local config_correct=true
-    # ... (rest of the checks remain the same as they are read-only) ...
-    # --- Check periodic configuration (20auto-upgrades) ---
+    # --- Periodic Configuration (20auto-upgrades) ---
+    # (Checks and sets APT::Periodic::Update-Package-Lists and Unattended-Upgrade to "1")
+    info "Checking periodic configuration ($periodic_config_file)..."
+    local periodic_correct=true
+    local periodic_content="// Generated by script\nAPT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n" # Corrected content generation
     if [[ ! -f "$periodic_config_file" ]]; then
         warn "'$periodic_config_file' does not exist."
-        config_correct=false
+        periodic_correct=false
     else
+        # Check if lines exist and are set to "1" (ignoring comments)
         if ! grep -qE '^\s*APT::Periodic::Update-Package-Lists\s*"1"\s*;' "$periodic_config_file"; then
-            warn "APT::Periodic::Update-Package-Lists not set to \"1\" in '$periodic_config_file'."
-            config_correct=false
+            warn "APT::Periodic::Update-Package-Lists not set correctly in '$periodic_config_file'."
+            periodic_correct=false
         fi
         if ! grep -qE '^\s*APT::Periodic::Unattended-Upgrade\s*"1"\s*;' "$periodic_config_file"; then
-            warn "APT::Periodic::Unattended-Upgrade not set to \"1\" in '$periodic_config_file'."
-            config_correct=false
+            warn "APT::Periodic::Unattended-Upgrade not set correctly in '$periodic_config_file'."
+            periodic_correct=false
         fi
     fi
 
-    # --- Check main configuration (50unattended-upgrades) ---
-    if [[ ! -f "$config_file" ]]; then
-        error "Configuration file '$config_file' not found!"
-        echo "--- Section 2 completed ---"; echo; return 1
-    fi
-    is_entry_active() { grep -qE "^\s*$1" "$config_file" && return 0 || return 1; }
-    check_origins=(
-        '"\${distro_id}ESMApps:\${distro_codename}-apps-security";'
-        '"\${distro_id}ESM:\${distro_codename}-infra-security";'
-        '"\${distro_id}:\${distro_codename}-updates";'
-    )
-    for origin in "${check_origins[@]}"; do if ! is_entry_active "$origin"; then warn "Origin $origin not active."; config_correct=false; fi; done
-    check_params=(
-        'Unattended-Upgrade::AutoFixInterruptedDpkg "true";' 'Unattended-Upgrade::MinimalSteps "true";'
-        'Unattended-Upgrade::MailReport "on-change";' 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";'
-        'Unattended-Upgrade::Remove-New-Unused-Dependencies "true";' 'Unattended-Upgrade::Remove-Unused-Dependencies "true";'
-        'Unattended-Upgrade::Automatic-Reboot "false";' 'Unattended-Upgrade::Allow-downgrade "true";'
-        'Unattended-Upgrade::Allow-APT-Mark-Fallback "true";'
-    )
-    for param in "${check_params[@]}"; do
-        local param_name="${param%% *}"; local param_value="${param#* }"
-        if ! grep -qE "^\s*$param_name\s+$param_value" "$config_file"; then warn "Parameter $param_name with value $param_value not set correctly."; config_correct=false; fi
-    done
-
-    if $config_correct; then
-        success "Unattended Upgrades configuration meets all requirements."
-        echo "--- Section 2 completed ---"; echo; return 0
-    fi
-
-    # Apply changes if needed
-    warn "Settings deviate or are missing from recommendations."
-    if ask_yes_no "Apply recommended settings now?" "y"; then
-        backup_file "$config_file" || return 1
-        backup_file "$periodic_config_file" || return 1
-
-        # Create/Update 20auto-upgrades
-        local periodic_content="// Generated by security_script.sh\nAPT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"
-        # DRY-RUN Handling
-        if $DRY_RUN; then
-            dry_run_echo "mkdir -p \"$(dirname "$periodic_config_file")\""
-            dry_run_echo "echo -e \"$periodic_content\" > \"$periodic_config_file\""
-            success "DRY-RUN: Would create/update '$periodic_config_file'."
-        else
-            mkdir -p "$(dirname "$periodic_config_file")"
-            if echo -e "$periodic_content" > "$periodic_config_file"; then
-                 log_change "MODIFIED:$periodic_config_file"
+    if ! $periodic_correct; then
+        if ask_yes_no "Apply recommended settings to '$periodic_config_file'?" "y"; then
+             backup_file "$periodic_config_file" || { error "Backup failed for $periodic_config_file"; return 1; }
+             if execute_command "WRITE_FILE:$periodic_config_file" "mkdir -p \"$(dirname "$periodic_config_file")\" && echo -e \"$periodic_content\" > \"$periodic_config_file\""; then
                  success "'$periodic_config_file' created/updated."
-            else
+                 # This file change is logged by execute_command, no need for changes_made here
+             else
                  error "Failed to write '$periodic_config_file'."
-                 restore_file "$periodic_config_file" # Attempt restore
+                 restore_file "$periodic_config_file"
                  return 1
-            fi
-        fi
-
-
-        # Update 50unattended-upgrades using awk and sed on a temporary file
-        local temp_file
-        temp_file=$(mktemp)
-        # --- AWK script to uncomment/activate ---
-        awk -v mode="process" '
-        function process_line(line, pattern) { if (index(line, pattern) > 0) { gsub(/^[ \t]*\/\/[ \t]*/, "", line); } return line; }
-        { line = $0;
-          line = process_line(line, "${distro_id}ESMApps:${distro_codename}-apps-security"); line = process_line(line, "${distro_id}ESM:${distro_codename}-infra-security");
-          line = process_line(line, "${distro_id}:${distro_codename}-updates"); line = process_line(line, "Unattended-Upgrade::AutoFixInterruptedDpkg");
-          line = process_line(line, "Unattended-Upgrade::MinimalSteps"); line = process_line(line, "Unattended-Upgrade::MailReport");
-          line = process_line(line, "Unattended-Upgrade::Remove-Unused-Kernel-Packages"); line = process_line(line, "Unattended-Upgrade::Remove-New-Unused-Dependencies");
-          line = process_line(line, "Unattended-Upgrade::Remove-Unused-Dependencies"); line = process_line(line, "Unattended-Upgrade::Automatic-Reboot");
-          line = process_line(line, "Unattended-Upgrade::Allow-downgrade"); line = process_line(line, "Unattended-Upgrade::Allow-APT-Mark-Fallback");
-          print line; }' "$config_file" > "$temp_file" || { error "AWK processing failed."; rm -f "$temp_file"; return 1; }
-
-        # --- Ensure required parameters/origins exist ---
-        declare -A params=( ["Unattended-Upgrade::AutoFixInterruptedDpkg"]="true" ["Unattended-Upgrade::MinimalSteps"]="true" ["Unattended-Upgrade::MailReport"]="on-change" ["Unattended-Upgrade::Remove-Unused-Kernel-Packages"]="true" ["Unattended-Upgrade::Remove-New-Unused-Dependencies"]="true" ["Unattended-Upgrade::Remove-Unused-Dependencies"]="true" ["Unattended-Upgrade::Automatic-Reboot"]="false" ["Unattended-Upgrade::Allow-downgrade"]="true" ["Unattended-Upgrade::Allow-APT-Mark-Fallback"]="true" )
-        for param in "${!params[@]}"; do value="${params[$param]}"; if ! grep -qE "^\s*$param\s+\"$value\";" "$temp_file"; then echo "$param \"$value\";" >> "$temp_file"; fi; done
-        declare -A origins=( ['${distro_id}ESMApps:${distro_codename}-apps-security']="1" ['${distro_id}ESM:${distro_codename}-infra-security']="1" ['${distro_id}:${distro_codename}-updates']="1" )
-        local origins_section=$(grep -n "Unattended-Upgrade::Allowed-Origins" "$temp_file" | cut -d ':' -f1)
-        if [[ -n "$origins_section" ]]; then
-            local section_end=$(tail -n +$origins_section "$temp_file" | grep -n "}" | head -1 | cut -d ':' -f1)
-            section_end=$((origins_section + section_end - 1))
-            for origin in "${!origins[@]}"; do if ! grep -q "$origin" "$temp_file"; then sed -i "${section_end}i\\	\"$origin\";" "$temp_file"; fi; done
-        fi
-
-        # Apply changes from temp file
-        # DRY-RUN Handling
-        if $DRY_RUN; then
-            dry_run_echo "mv \"$temp_file\" \"$config_file\""
-            dry_run_echo "chmod 644 \"$config_file\""
-            success "DRY-RUN: Would apply changes to $config_file"
-            rm -f "$temp_file" 2>/dev/null # Clean up temp file even in dry run
+             fi
         else
-            if mv "$temp_file" "$config_file"; then
-                chmod 644 "$config_file"
-                log_change "MODIFIED:$config_file"
-                success "Changes applied to $config_file"
-                 # Verification (read-only, no dry run needed)
-                 info "Verifying configuration changes..."
-                 local verify_fail=false
-                 for origin in "${!origins[@]}"; do if ! grep -q "^\s*\"$origin\"" "$config_file"; then warn "Failed to activate origin: $origin"; verify_fail=true; fi; done
-                 for param in "${!params[@]}"; do value="${params[$param]}"; if ! grep -qE "^\s*$param\s+\"$value\";" "$config_file"; then warn "Failed to set parameter: $param to \"$value\""; verify_fail=true; fi; done
-                 if $verify_fail; then warn "Some config changes couldn't be verified. Check '$config_file'."; else success "Config changes verified."; fi
-            else
-                error "Failed to apply changes to $config_file"
-                rm -f "$temp_file" 2>/dev/null
-                restore_file "$config_file" # Attempt restore
-                return 1
-            fi
+             info "Skipping changes to '$periodic_config_file'."
         fi
     else
-        info "No changes applied to Unattended Upgrades configuration."
+        success "'$periodic_config_file' already configured correctly."
     fi
+
+
+    # --- Main Configuration (50unattended-upgrades) ---
+    info "Checking main configuration ($config_file)..."
+    if [[ ! -f "$config_file" ]]; then
+        error "Configuration file '$config_file' not found! Cannot proceed."
+        echo "--- Section 2 completed (with error) ---"; echo; return 1
+    fi
+
+    # Create temporary file for modifications
+    temp_file=$(mktemp)
+    # Ensure temporary file is removed on script exit or interruption
+    trap 'rm -f "$temp_file"' EXIT SIGHUP SIGINT SIGQUIT SIGTERM
+    cp "$config_file" "$temp_file" || { error "Could not create temporary file."; return 1; }
+
+    # --- Define Desired Settings ---
+    # Parameters check (Key-Value pairs)
+    declare -A desired_params=(
+        ["Unattended-Upgrade::AutoFixInterruptedDpkg"]="true"
+        ["Unattended-Upgrade::MinimalSteps"]="true"
+        ["Unattended-Upgrade::MailReport"]="on-change"
+        ["Unattended-Upgrade::Remove-Unused-Kernel-Packages"]="true"
+        ["Unattended-Upgrade::Remove-New-Unused-Dependencies"]="true" # Often redundant but harmless
+        ["Unattended-Upgrade::Remove-Unused-Dependencies"]="true"
+        ["Unattended-Upgrade::Automatic-Reboot"]="true"
+        ["Unattended-Upgrade::Automatic-Reboot-WithUsers"]="false" # Needs "false"
+        ["Unattended-Upgrade::Automatic-Reboot-Time"]="02:00"
+        ["Unattended-Upgrade::Allow-downgrade"]="true" # Added from your list
+        ["Unattended-Upgrade::Allow-APT-Mark-Fallback"]="true" # Added from your list
+        # Mail is handled separately below
+    )
+
+    # Origins Patterns (Dynamic based on distro info)
+    # Ensure quoting within the string for correct matching/replacement
+    local origin_apps_pattern="\"${distro_id}ESMApps:${distro_codename}-apps-security\";"
+    local origin_infra_pattern="\"${distro_id}ESM:${distro_codename}-infra-security\";"
+    local origin_updates_pattern="\"${distro_id}:${distro_codename}-updates\";"
+    # Add other standard origins if desired (e.g., security)
+    local origin_security_pattern="\"${distro_id}:${distro_codename}-security\";" # Common important one
+
+    declare -a desired_origins=(
+        # Order might matter for readability, but not functionality
+        "$origin_security_pattern" # Often the most critical
+        "$origin_updates_pattern"
+        "$origin_apps_pattern" # Typically for Ubuntu Pro/ESM
+        "$origin_infra_pattern" # Typically for Ubuntu Pro/ESM
+    )
+
+    # --- Helper Function to Process Parameters ---
+    # Ensures a specific parameter exists, is uncommented, and has the correct value
+    # Returns 0 if a change was made to the temp file, 1 if it was already correct, 2 if missing (added later)
+    process_parameter_line() {
+        local key="$1" desired_value="$2" file="$3"
+        local line_changed=false
+        local current_line current_value is_commented=false
+
+        # Use grep to find the line, capturing comment status and value
+        current_line=$(grep -E "^\s*(//\s*)?${key}\s+" "$file")
+
+        if [[ -n "$current_line" ]]; then
+            # Line found, check if commented
+            if [[ "$current_line" =~ ^\s*// ]]; then
+                is_commented=true
+            fi
+            # Extract current value (handles quotes)
+            current_value=$(echo "$current_line" | sed -E 's/^\s*(\/\/\s*)?.*'"${key}"'\s*"(.*)".*/\2/')
+             # If no quotes, try without
+             if [[ "$current_value" == "$current_line" ]]; then # Extraction failed, likely no quotes
+                current_value=$(echo "$current_line" | sed -E 's/^\s*(\/\/\s*)?.*'"${key}"'\s*([^;]*)\s*;.*/\2/')
+                # Simple true/false might not have quotes
+                if [[ "$current_value" == "$current_line" ]]; then # Still failed? Try without value extraction, direct compare if boolean
+                     if [[ "$desired_value" == "true" || "$desired_value" == "false" ]] then
+                          if [[ "$current_line" =~ ${key}[[:space:]]+${desired_value}[[:space:]]* ]]; then
+                                 current_value="$desired_value" # Assume match if pattern found
+                           fi
+                     fi
+                fi
+            fi
+
+
+            # Check if modification is needed
+            if $is_commented || [[ "$current_value" != "$desired_value" ]]; then
+                # Need to uncomment and/or set the correct value
+                local replacement_line="${key} \"${desired_value}\";"
+                # Use @ as delimiter for sed
+                local sed_pattern="s@^\s*(//\s*)?${key}\s+.*@${replacement_line}@g"
+                sed -i -E "$sed_pattern" "$file"
+                line_changed=true
+            fi
+        else
+            # Line not found at all
+            return 2 # Signal missing
+        fi
+
+        if $line_changed; then
+            return 0 # Changed
+        else
+            return 1 # Already correct
+        fi
+    }
+
+    # --- Process Parameters ---
+    info "Processing parameters in $config_file..."
+    local param_missing=false
+    for key in "${!desired_params[@]}"; do
+        local value="${desired_params[$key]}"
+        info "Checking parameter: $key = \"$value\";"
+        process_parameter_line "$key" "$value" "$temp_file"
+        local result=$?
+        if [[ $result -eq 0 ]]; then
+            success " -> Modified/Uncommented: $key to \"$value\";"
+            changes_made=true # Mark that the temp file was modified
+        elif [[ $result -eq 1 ]]; then
+             success " -> Already correct: $key = \"$value\";"
+        elif [[ $result -eq 2 ]]; then
+            warn " -> Missing parameter: $key"
+            local line_to_add="$key \"$value\";"
+            # Append the missing line to the temp file
+            echo "$line_to_add" >> "$temp_file"
+            success " -> Added missing: $key = \"$value\";"
+            changes_made=true # Mark that the temp file was modified
+            param_missing=true
+        fi
+    done
+    if ! $param_missing; then success "All specified parameters are present."; fi
+
+
+    # --- Process Allowed-Origins ---
+    info "Processing Allowed-Origins in $config_file..."
+    local origins_block_start_pattern="^\s*(//\s*)?Unattended-Upgrade::Allowed-Origins\s*\{"
+    local origins_block_end_pattern="^\s*\};" # End pattern includes the semicolon now
+    local origins_block_start_line origins_block_end_line
+
+    # Find the start line number of the block
+    origins_block_start_line=$(grep -nE "$origins_block_start_pattern" "$temp_file" | head -n 1 | cut -d: -f1)
+
+    if [[ -z "$origins_block_start_line" ]]; then
+        warn "Allowed-Origins block start not found. Cannot process origins automatically."
+        # Consider adding the whole block if critical, but adds complexity.
+        # For now, we skip origins if the block isn't found.
+    else
+        # Find the end line number starting from the start line
+        # Add 1 to start line for tail, adjust end line number calculation
+        origins_block_end_line=$(tail -n +$((origins_block_start_line)) "$temp_file" | grep -nm 1 -E "$origins_block_end_pattern" | cut -d: -f1)
+
+        if [[ -z "$origins_block_end_line" ]]; then
+             warn "Allowed-Origins block end ('};') not found after start line $origins_block_start_line. Cannot process origins."
+        else
+            # Calculate absolute end line number in the temp file
+            origins_block_end_line=$((origins_block_start_line + origins_block_end_line -1 ))
+            info "Found Allowed-Origins block between lines $origins_block_start_line and $origins_block_end_line."
+
+            # 1. Uncomment Block Start if necessary
+            if grep -qE "^\s*//\s*Unattended-Upgrade::Allowed-Origins\s*\{" "$temp_file"; then
+                 local sed_script="s@^\s*//\s*\(Unattended-Upgrade::Allowed-Origins\s*{\)@\1@g"
+                 sed -i "${origins_block_start_line}s@^\s*//\s*\(Unattended-Upgrade::Allowed-Origins\s*{\)@\1@g" "$temp_file"
+                 success " -> Uncommented Allowed-Origins block start."
+                 changes_made=true
+            fi
+
+            # 2. Process each desired origin within the block
+            # 2. Process each desired origin within the block
+            local origin_missing_in_block=false
+            for origin in "${desired_origins[@]}"; do
+                info "Checking origin: $origin"
+
+                # Prepare patterns for grep checks (ensure quoting/escaping is correct)
+                # Pattern for the exact, uncommented origin line (allowing variable leading space)
+                local active_pattern="^\s*${origin}\s*$"
+                # Pattern for the exact, commented origin line
+                local commented_pattern="^\s*//\s*${origin}\s*$"
+
+                # Check if the origin is already active within the block lines
+                if sed -n "${origins_block_start_line},${origins_block_end_line}p" "$temp_file" | grep -qE "$active_pattern"; then
+                    success " -> Origin already active: $origin"
+                    continue # Already correct, move to the next origin
+                fi
+
+                # Check if the origin is commented out within the block lines
+                local commented_line_num
+                # Get line number relative to the start of the file
+                commented_line_num=$(sed -n "${origins_block_start_line},${origins_block_end_line} { ${commented_pattern}=; }" "$temp_file" | head -n 1)
+
+                if [[ -n "$commented_line_num" ]]; then
+                    # Found it commented. Construct the uncommented version with proper indentation.
+                    # Using printf to handle the tab reliably
+                    local uncommented_line
+                    printf -v uncommented_line '\t%s' "$origin"
+
+                    # Escape for sed replacement string (RHS of s///)
+                    local sed_rhs=${uncommented_line//\\/\\\\}
+                    sed_rhs=${sed_rhs//&/\\&}
+                    sed_rhs=${sed_rhs//\//\\/} # Escape slashes too for RHS
+
+                    # Use sed to replace the found commented line with the uncommented version
+                    # Match the whole commented line pattern
+                    local sed_script="s@^\s*//\s*${origin}\s*$@${sed_rhs}@g"
+                    sed -i "${commented_line_num}s@${sed_script}@" "$temp_file"
+
+                    if [[ $? -eq 0 ]]; then
+                         success " -> Uncommented existing origin: $origin"
+                         changes_made=true
+                    else
+                         error " -> Failed to uncomment origin on line $commented_line_num"
+                    fi
+                    continue # Processed (or failed), move to the next origin
+                fi
+
+                # If we reach here, the origin was neither active nor commented out. Add it.
+                warn " -> Missing origin: $origin"
+                local line_to_insert
+                printf -v line_to_insert '\t%s' "$origin" # Use printf for reliable tab
+
+                # Escape backslashes and other special sed characters for the text to be inserted
+                local sed_insert_text=${line_to_insert//\\/\\\\}
+                sed_insert_text=${sed_insert_text//\//\\/} # Escape /
+                sed_insert_text=${sed_insert_text//&/\\&}   # Escape &
+
+                # Insert the line *before* the end line
+                sed -i "${origins_block_end_line}i ${sed_insert_text}" "$temp_file"
+
+                if [[ $? -eq 0 ]]; then
+                    success " -> Added missing origin: $origin"
+                    changes_made=true
+                    origin_missing_in_block=true
+                    # IMPORTANT: Increment the end line number since we inserted a line *before* it
+                    origins_block_end_line=$((origins_block_end_line + 1))
+                else
+                    error " -> Failed to insert missing origin: $origin"
+                fi
+
+            done # End loop through desired_origins
+
+
+            # 3. Uncomment Block End if necessary (less common, but for completeness)
+            local current_end_line_content=$(sed -n "${origins_block_end_line}p" "$temp_file")
+            # *** CORRECTED LINE BELOW ***
+            # Checks if the line starts with optional space, then //, then optional space, then }
+            if [[ "$current_end_line_content" =~ ^\s*//\s*\} ]]; then
+                 # The sed command below correctly targets the commented '};' and uncomment it
+                 sed -i "${origins_block_end_line}s@^\s*//\s*(\};)@\1@g" "$temp_file"
+                 success " -> Uncommented Allowed-Origins block end."
+                 changes_made=true
+            fi
+        fi # End block end found check
+    fi # End block start found check
+
+    # --- Check and Configure Email Address ---
+    info "Checking Unattended-Upgrade::Mail..."
+    local mail_key="Unattended-Upgrade::Mail"
+    local mail_report_key="Unattended-Upgrade::MailReport"
+    local mail_report_value=$(grep -E "^\s*${mail_report_key}\s+\"(.*)\";" "$temp_file" | sed -E 's/.*"(.*)".*/\1/')
+    local current_mail_line mail_value current_mail_is_commented=false
+
+    # Only check/prompt for mail if MailReport is not "only-on-error" or "never"
+    if [[ "$mail_report_value" == "on-change" || "$mail_report_value" == "always" ]]; then
+        current_mail_line=$(grep -E "^\s*(//\s*)?${mail_key}\s+" "$temp_file")
+
+        if [[ -n "$current_mail_line" ]]; then
+            mail_value=$(echo "$current_mail_line" | sed -E 's/^\s*(\/\/\s*)?.*'"${mail_key}"'\s*"(.*)".*/\2/')
+            [[ "$current_mail_line" =~ ^\s*// ]] && current_mail_is_commented=true
+            info "Found existing mail setting: Line='$current_mail_line', Value='$mail_value', Commented=$current_mail_is_commented"
+        else
+            info "Mail setting '$mail_key' not found in the file."
+            mail_value=""
+            current_mail_is_commented=true # Treat as inactive
+        fi
+
+        local is_valid_mail=false
+        # Use the script's existing validate_email function [cite: 49]
+        if [[ -n "$mail_value" ]] && ! $current_mail_is_commented && validate_email "$mail_value"; then
+           is_valid_mail=true
+        fi
+
+        if ! $is_valid_mail; then
+            if $current_mail_is_commented; then
+                warn "Mail setting is missing or commented out."
+            elif [[ -z "$mail_value" ]]; then
+                 warn "Mail address is empty."
+            else
+                 warn "Existing mail address '$mail_value' seems invalid."
+            fi
+
+            if ask_yes_no "Set a valid email address for reports (required for MailReport=$mail_report_value)?" "y"; then
+                 local new_mail=""
+                 while true; do
+                     read -p "Enter the email address: " new_mail
+                     if [[ -n "$new_mail" ]] && validate_email "$new_mail"; then
+                         info "Using email address: $new_mail"
+                         break
+                     else
+                         warn "Invalid email format. Please try again (e.g., user@example.com)."
+                     fi
+                 done
+
+                # Replace or add the line in the temp file
+                local new_mail_line="${mail_key} \"${new_mail}\";"
+                if grep -qE "^\s*(//\s*)?${mail_key}\s+" "$temp_file"; then
+                    # Line exists, replace it (ensures uncommented)
+                    local sed_script="s@^\s*(//\s*)?${mail_key}\s+.*@${new_mail_line}@g"
+                    sed -i -E "$sed_script" "$temp_file"
+                    success " -> Updated mail address to: $new_mail"
+                else
+                    # Line doesn't exist, add it
+                    echo "$new_mail_line" >> "$temp_file"
+                    success " -> Added mail address: $new_mail"
+                fi
+                changes_made=true # Mark temp file as modified
+            else
+                 info "Skipping email configuration. Mail reports might not be sent."
+            fi
+        else
+             success "Mail address '$mail_value' found, seems valid, and is active."
+        fi
+    else
+        info "Mail reporting is set to '$mail_report_value'. Skipping Mail address check."
+    fi
+
+
+    # --- Apply Changes if Modifications Occurred ---
+    if $changes_made; then
+        info "Applying changes to $config_file..."
+        backup_file "$config_file" || { error "Backup failed for $config_file"; rm -f "$temp_file"; trap - EXIT SIGHUP SIGINT SIGQUIT SIGTERM; return 1; }
+
+        # Optional: Show diff before applying (only if not dry run, as execute_command shows diff in dry run)
+        if ! $DRY_RUN && command -v diff &>/dev/null; then
+            info "--- DIFF ---"
+            diff -u "$config_file" "$temp_file" || true # Ignore diff exit code
+            info "--- END DIFF ---"
+            if ! ask_yes_no "Apply these changes?" "y"; then
+                 info "Changes discarded."
+                 rm -f "$temp_file"
+                 trap - EXIT SIGHUP SIGINT SIGQUIT SIGTERM # Remove trap
+                 return 0 # User chose not to apply
+            fi
+        fi
+
+        # Use execute_command to handle moving the file and logging
+        if execute_command "APPLY_CONFIG:$config_file" "mv \"$temp_file\" \"$config_file\" && chmod 644 \"$config_file\""; then
+            success "Changes applied successfully to $config_file."
+            # Optional: Reload service if needed, e.g., apt-config dump might reload caches? Check documentation.
+            # execute_command "RELOAD_APT_CONFIG?" "apt-config dump" # Example, might not be needed
+        else
+            error "Failed to apply changes to $config_file!"
+            restore_file "$config_file" # Attempt restore on failure
+            # temp_file might still exist if mv failed, trap will clean it up
+            return 1
+        fi
+    else
+        success "No changes were needed for $config_file based on the desired configuration."
+    fi
+
+    # Explicitly remove trap as we are done with temp_file
+    trap - EXIT SIGHUP SIGINT SIGQUIT SIGTERM
+    rm -f "$temp_file" 2>/dev/null # Clean up temp file if it still exists (e.g., dry run or no changes)
+
     echo "--- Section 2 completed ---"; echo
+    return 0
 }
+
 # --- End Unattended Upgrades ---
+
 
 # --- MSMTP ---
 configure_msmtp() {
@@ -855,9 +1160,10 @@ configure_msmtp() {
                     [[ "$pkgs_to_install" =~ "$mta_pkg" ]] && log_change "INSTALLED:$mta_pkg"
                     [[ "$pkgs_to_install" =~ "$mailutils_pkg" ]] && log_change "INSTALLED:$mailutils_pkg"
                  fi
-            else info "MSMTP skipped."; echo "--- Section 3 completed ---"; echo; return 0; fi
+             else info "MSMTP skipped."; echo "--- Section 3 completed ---"; echo; return 0; fi
          fi
-    else success "Required MSMTP packages are installed."; fi
+    else success "Required MSMTP packages are installed.";
+    fi
 
     # Configure MSMTP
     local configure_msmtp=false
@@ -900,7 +1206,7 @@ configure_msmtp() {
                     dry_run_echo "chown \"$config_owner\":\"$config_owner\" \"$(dirname "$logfile_path")\""
                     dry_run_echo "chown \"$config_owner\":\"$config_owner\" \"$logfile_path\""
                 else
-                    dry_run_echo "chown root:root \"$config_file_path\""
+                     dry_run_echo "chown root:root \"$config_file_path\""
                     dry_run_echo "chown root:root \"$logfile_path\"" # Assuming /root/.msmtp.log
                 fi
                 success "DRY-RUN: Would save MSMTP config to '$config_file_path' and set up log file."
@@ -946,7 +1252,8 @@ configure_msmtp() {
                              if eval "$effective_mail_cmd"; then success "Test email sent."; log_change "$log_msg"; else warn "Could not send test email. Check $logfile_path"; fi
                         fi
                     fi
-                else warn "Package 'mailutils' not found, skipping test email."; fi
+                else warn "Package 'mailutils' not found, skipping test email.";
+                fi
             fi # End actual execution block
         fi
     fi
@@ -1006,7 +1313,6 @@ configure_ssh_hardening() {
                          echo "" >> "$temp_ssh_conf"; echo "AllowUsers $target_users" >> "$temp_ssh_conf"
                     fi # End grep if/else block
                     info "Set 'AllowUsers $target_users' in temporary SSH config."
-
                     # DRY-RUN Handling for applying AllowUsers
                     if $DRY_RUN; then
                          dry_run_echo "sshd -t -f \"$temp_ssh_conf\" # Validate temp config"
@@ -1035,11 +1341,9 @@ configure_ssh_hardening() {
             else # Corresponds to: if $all_users_exist
                 info "AllowUsers config skipped due to non-existent user(s)."
             fi # End all_users_exist block
-        # *** CORRECTED PART START ***
         else # Corresponds to: if [[ -n "$target_users" ]]
              info "AllowUsers config skipped (no users specified)."
         fi # End target_users check
-        # *** CORRECTED PART END ***
     else # Corresponds to: if ask_yes_no "Adjust AllowUsers...?"
         info "AllowUsers configuration skipped."
     fi # End main AllowUsers question block
@@ -1066,7 +1370,8 @@ configure_ssh_hardening() {
         if [[ -z "$current_effective_value" ]]; then
              if [[ "$param" == "ChallengeResponseAuthentication" ]]; then local pam_status=$(get_effective_sshd_config "UsePAM"); [[ "$pam_status" == "yes" ]] && current_effective_value="yes" || current_effective_value="no";
              elif [[ "$param" == "PasswordAuthentication" ]]; then current_effective_value="yes"; elif [[ "$param" == "PermitRootLogin" ]]; then current_effective_value="yes";
-             elif [[ "$param" == "X11Forwarding" ]]; then current_effective_value="no"; elif [[ "$param" == "PrintLastLog" ]]; then current_effective_value="yes"; fi
+             elif [[ "$param" == "X11Forwarding" ]]; then current_effective_value="no";
+             elif [[ "$param" == "PrintLastLog" ]]; then current_effective_value="yes"; fi
              debug "Parameter '$param' not explicit, using assumed default '$current_effective_value'."
         fi
         recommended_value="${ssh_recommendations[$param]}"
@@ -1157,11 +1462,13 @@ configure_ssh_hardening() {
                          sshd_needs_restart=true
                      else
                          error "Failed to move temp SSH config for parameter changes."
-                         rm -f "$temp_ssh_conf" 2>/dev/null; if ! $apply_allowusers; then restore_file "$ssh_config_file"; fi; return 1; # Restore only if not modified by AllowUsers
+                         rm -f "$temp_ssh_conf" 2>/dev/null; if ! $apply_allowusers; then restore_file "$ssh_config_file"; fi; return 1;
+                         # Restore only if not modified by AllowUsers
                      fi
                  else
                      error "SSHD config test failed for parameter changes. Changes not applied."
-                     rm -f "$temp_ssh_conf" 2>/dev/null; if ! $apply_allowusers; then restore_file "$ssh_config_file"; fi; return 1; # Restore only if not modified by AllowUsers
+                     rm -f "$temp_ssh_conf" 2>/dev/null; if ! $apply_allowusers; then restore_file "$ssh_config_file"; fi; return 1;
+                     # Restore only if not modified by AllowUsers
                  fi # End sshd -t block
             fi # End dry run check for parameter apply
         else info "No changes applied to SSH hardening parameters."; fi
@@ -1189,13 +1496,11 @@ configure_ssh_hardening() {
 }
 # --- End SSH Hardening ---
 
-# --- End SSH Hardening ---
-
-
 # --- Fail2ban Helper Function ---
 is_ip_covered_by_ignoreip() {
     local check_item="$1"; shift; local ignore_list_items=("$@"); local ip_to_check subnet_to_check
-    if [[ "$check_item" =~ / ]]; then subnet_to_check="$check_item"; else ip_to_check="$check_item"; if [[ "$ip_to_check" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then subnet_to_check=$(echo "$ip_to_check" | cut -d. -f1-3).0/24; fi; fi
+    if [[ "$check_item" =~ / ]]; then subnet_to_check="$check_item"; else ip_to_check="$check_item";
+    if [[ "$ip_to_check" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then subnet_to_check=$(echo "$ip_to_check" | cut -d. -f1-3).0/24; fi; fi
     # debug "Checking coverage for IP: '$ip_to_check', Subnet: '$subnet_to_check'" # Keep debug off by default
     for ignored_entry in "${ignore_list_items[@]}"; do
         if [[ "$ip_to_check" == "$ignored_entry" ]] || [[ "$subnet_to_check" == "$ignored_entry" ]]; then return 0; fi # Exact match
@@ -1225,7 +1530,8 @@ configure_fail2ban() {
             if ! $SCRIPT_APT_UPDATED; then info "Running 'apt update'..."; execute_command "APT_UPDATE" "apt update" && SCRIPT_APT_UPDATED=true || { error "'apt update' failed."; return 1; }; fi
             if execute_command "INSTALLED:$pkg" "apt install -y \"$pkg\""; then success "'$pkg' installed."; else error "Installation failed."; return 1; fi
         else info "Fail2ban skipped."; return 0; fi
-    else success "Package '$pkg' is already installed."; fi
+    else success "Package '$pkg' is already installed.";
+    fi
 
     # Ensure jail.local exists
     if [[ ! -f "$jail_local" ]]; then
@@ -1239,7 +1545,8 @@ configure_fail2ban() {
                  else error "Failed to copy '$jail_conf'."; return 1; fi
             else error "Cannot proceed without '$jail_local'."; return 1; fi
         else error "'$jail_conf' not found. Cannot create '$jail_local'."; return 1; fi
-    else success "Local Fail2ban configuration '$jail_local' found."; fi
+    else success "Local Fail2ban configuration '$jail_local' found.";
+    fi
 
     # Enable [sshd] jail
     local ssh_jail_name="sshd"
@@ -1267,7 +1574,8 @@ configure_fail2ban() {
                  fi
              fi
         fi
-    else success "Jail '[$ssh_jail_name]' is already enabled in '$jail_local'."; fi
+    else success "Jail '[$ssh_jail_name]' is already enabled in '$jail_local'.";
+    fi
 
     # Whitelist local IPs
     info "Checking Fail2ban ignoreip for local networks..."
@@ -1317,7 +1625,8 @@ configure_fail2ban() {
                  fi
              fi
         fi
-    else success "All detected local IPv4 subnets seem covered by ignoreip."; fi
+    else success "All detected local IPv4 subnets seem covered by ignoreip.";
+    fi
 
     # Service Management
     info "Checking Fail2ban service status..."
@@ -1335,14 +1644,16 @@ configure_fail2ban() {
              # DRY-RUN Handling for start
              if execute_command "SERVICE_STARTED:$pkg" "systemctl start \"$pkg\""; then success "Fail2ban service started."; else error "Failed to start Fail2ban."; fi
          fi
-    else success "Fail2ban service is active."; fi
+    else success "Fail2ban service is active.";
+    fi
 
     if [[ "$needs_enable" = true ]]; then
          if ask_yes_no "Enable Fail2ban service now?" "y"; then
              # DRY-RUN Handling for enable
              if execute_command "SERVICE_ENABLED:$pkg" "systemctl enable \"$pkg\""; then success "Fail2ban service enabled."; else error "Failed to enable Fail2ban."; fi
          fi
-    else success "Fail2ban service is enabled."; fi
+    else success "Fail2ban service is enabled.";
+    fi
 
     echo "--- Section 4b completed ---"; echo
 }
@@ -1363,7 +1674,8 @@ configure_sshguard() {
              if ! $SCRIPT_APT_UPDATED; then info "Running 'apt update'..."; execute_command "APT_UPDATE" "apt update" && SCRIPT_APT_UPDATED=true || { error "'apt update' failed."; return 1; }; fi
              if execute_command "INSTALLED:$pkg" "apt install -y \"$pkg\""; then success "'$pkg' installed."; else error "Installation failed."; return 1; fi
         else info "SSHGuard skipped."; return 0; fi
-    else success "Package '$pkg' is already installed."; fi
+    else success "Package '$pkg' is already installed.";
+    fi
 
     # Check service status (read-only)
     info "Checking SSHGuard service status..."
@@ -1376,7 +1688,8 @@ configure_sshguard() {
     if command -v ufw > /dev/null && ufw status | grep -q "Status: active"; then backend="UFW"; info "Detected UFW backend.";
     elif command -v nft > /dev/null && nft list ruleset | grep -q 'hook input'; then backend="nftables"; info "Detected nftables backend.";
     elif command -v iptables > /dev/null && iptables -L INPUT -n | grep -q 'Chain INPUT'; then backend="iptables"; info "Detected iptables backend.";
-    else warn "Could not determine active firewall backend (UFW, nftables, iptables)."; fi
+    else warn "Could not determine active firewall backend (UFW, nftables, iptables).";
+    fi
 
     # Manage whitelist
     info "Checking SSHGuard whitelist..."
@@ -1425,11 +1738,12 @@ configure_sshguard() {
                         needs_restart=true
                     fi
                 else
-                    error "Failed to append to whitelist file."; restore_file "$whitelist_file"; return 1
+                     error "Failed to append to whitelist file."; restore_file "$whitelist_file"; return 1
                 fi
             fi # End dry run check for append
         fi
-    else success "All detected local IPs/subnets seem present in '$whitelist_file'."; fi
+    else success "All detected local IPs/subnets seem present in '$whitelist_file'.";
+    fi
 
     # Service Management
     if [[ "$needs_start" = true ]]; then
@@ -1463,7 +1777,8 @@ get_ufw_allowed_ports() {
 
 get_listening_ports() {
     local ss_tcp_output ss_udp_output; ss_tcp_output=$(ss -ltn); ss_udp_output=$(ss -lun)
-    # debug "Raw ss TCP output:\n$ss_tcp_output"; debug "Raw ss UDP output:\n$ss_udp_output"
+    # debug "Raw ss TCP output:\n$ss_tcp_output";
+    debug "Raw ss UDP output:\n$ss_udp_output"
     local tcp_port_list; tcp_port_list=$(echo "$ss_tcp_output" | awk 'NR>1{for(i=1;i<=NF;i++){if($i~/:/){split($i,a,":");p=a[length(a)];sub(/%.*$/,"",p);if(p~/^[0-9]+$/&&p>0&&p<65536)print p",tcp"}}}')
     local udp_port_list; udp_port_list=$(echo "$ss_udp_output" | awk 'NR>1{for(i=1;i<=NF;i++){if($i~/:/){split($i,a,":");p=a[length(a)];sub(/%.*$/,"",p);if(p~/^[0-9]+$/&&p>0&&p<65536)print p",udp"}}}')
     echo "${tcp_port_list}"; echo "${udp_port_list}"
@@ -1517,17 +1832,18 @@ configure_ufw() {
             # DRY-RUN Handling for ufw enable
             if execute_command "UFW_ENABLED" "ufw enable"; then success "UFW enabled."; else error "Failed to enable UFW."; fi
         else info "UFW remains inactive."; echo "--- Section 6 completed ---"; echo; return 0; fi # Renumbered section
-    else success "UFW is active."; fi
+    else success "UFW is active.";
+    fi
 
     # Get allowed ports map
     if ! get_ufw_allowed_ports; then error "Could not reliably get UFW allowed ports. Skipping interactive check."; echo "--- Section 6 completed ---"; echo; return 1; fi # Renumbered section
     info "Currently allowed ports in UFW map (found ${#ufw_allowed_ports_map[@]} entries)."
-
     # Identify listening and container ports
     info "Determining listening host & container ports..."
     declare -A listening_ports_map
     local all_ports_str; all_ports_str="$(get_listening_ports)$(get_container_ports)"
-    if [[ -z "$all_ports_str" ]]; then info "No listening ports detected."; else while IFS="," read -r port proto; do if [[ -n "$port" && -n "$proto" ]]; then listening_ports_map["$port"]="$proto"; fi; done <<< "$all_ports_str"; success "Detected ${#listening_ports_map[@]} unique listening ports (host+container)."; fi
+    if [[ -z "$all_ports_str" ]]; then info "No listening ports detected.";
+    else while IFS="," read -r port proto; do if [[ -n "$port" && -n "$proto" ]]; then listening_ports_map["$port"]="$proto"; fi; done <<< "$all_ports_str"; success "Detected ${#listening_ports_map[@]} unique listening ports (host+container)."; fi
 
     if [[ ${#listening_ports_map[@]} -eq 0 ]]; then info "No listening ports found to check against firewall."; echo "--- Section 6 completed ---"; echo; return 0; fi # Renumbered section
 
@@ -1614,7 +1930,6 @@ configure_journald() {
                  else warn "No [Journal] section found. Appending."; echo "" >> "$temp_journal_conf"; echo "[Journal]" >> "$temp_journal_conf"; echo "$param_key=$desired_value" >> "$temp_journal_conf"; fi
             fi
             info "Set '$param_key=$desired_value' in temporary journald config."
-
             # DRY-RUN Handling for applying journald changes
             if $DRY_RUN; then
                 dry_run_echo "mv \"$temp_journal_conf\" \"$config_file\""
@@ -1711,7 +2026,8 @@ configure_clamav() {
                  execute_command "SERVICE_ENABLED:$freshclam_service" "systemctl enable \"$freshclam_service\"" && success "'$freshclam_service' enabled." || error "Failed to enable '$freshclam_service'."
             fi
         else success "'$freshclam_service' service is already enabled."; fi
-    else warn "Could not find '$freshclam_service'. Verify automatic updates manually."; fi
+    else warn "Could not find '$freshclam_service'. Verify automatic updates manually.";
+    fi
 
     # Configure clamd service
     info "Checking status of '$clamd_service'..."
