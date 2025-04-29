@@ -124,7 +124,7 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
 chmod +x Linux-server-security_script.sh
-sudo ./sudo ./Linux-server-security_script.sh
+sudo ./Linux-server-security_script.sh
 ``` 
 
 Hinweise
