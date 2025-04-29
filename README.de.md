@@ -86,22 +86,28 @@ Das Skript bietet eine Vielzahl von Automatisierungshilfen und Sicherheitsmaßna
    sudo ./Linux-server-security_script.sh --dry-run
   ```
 
-## ✨ Feature-Matrix: Vergleich zu anderen Hardening-Skripten
+## ✨ Feature-Matrix: Vergleich mit anderen Hardening-Skripten
 
-| Funktion                               | linux-server-security (dieses Projekt) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
-|:---------------------------------------|:--------------------------------------|:------------------------------|:------------------------|:-----------------------------|
-| **Interaktive Benutzerführung**        | ✅ Ja                                | 🔶 Teilweise                   | ❌ Nein                 | ❌ Nein                     |
-| **Idempotent (wiederholbare Ausführung ohne Probleme)** | ✅ Ja         | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
-| **Automatisches SSH-Hardening (Server + Client)** | ✅ Ja            | ✅ Ja                        | ✅ Ja                   | ✅ Ja                      |
-| **Optionale Google 2FA Absicherung**   | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | ❌ Nein                    |
-| **sysctl.conf Sicherheitsoptimierungen** | ✅ Ja (eigene `/etc/sysctl.d/` Datei) | 🔶 Minimal                   | 🔶 Teilweise Prüfungen  | ✅ Vollständig (Ansible)  |
-| **Firewall-Konfiguration (UFW)**       | ✅ Ja                                | 🔶 Teilweise (nur iptables)    | 🔶 Teilweise             | ✅ Ja                      |
-| **Automatische Updates (unattended-upgrades)** | ✅ Ja             | 🔶 Teilweise                   | ❌ Nein                 | ✅ Ja                      |
-| **Fail2Ban oder SSHGuard Integration** | ✅ Ja (optional)                     | ✅ Ja                        | ❌ Nein                 | ✅ Ja                      |
-| **ClamAV Virenschutz Integration (optional)** | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | ❌ Nein                    |
-| **Optimiert für Debian und Ubuntu**    | ✅ Ja                                | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
-| **Automatische Backups vor Änderungen** | ✅ Ja                                | ❌ Nein                      | ❌ Nein                 | 🔶 Teilweise               |
-| **Auditd/Compliance Fokus**             | ❌ Bewusst ausgeschlossen            | 🔶 Teilweise                   | ✅ Ja                   | ✅ Ja                      |
+| Funktion | linux-server-security (dieses Projekt) | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
+|:---------|:---------------------------------------|:------------------------------|:-----------------------|:---------------------------|
+| Interaktive Benutzerführung | ✅ Ja | 🔶 Teilweise | ❌ Nein | ❌ Nein |
+| Idempotenz (sicher bei wiederholten Ausführungen) | ✅ Ja | 🔶 Teilweise | ✅ Ja | ✅ Ja |
+| Automatisches SSH-Hardening (Server- und Client-Einstellungen) | ✅ Ja | ✅ Ja | ✅ Ja | ✅ Ja |
+| Optionale Google 2FA-Integration | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| sysctl.conf Sicherheitsoptimierungen | ✅ Ja (eigene `/etc/sysctl.d/` Datei) | 🔶 Minimal | 🔶 Teilweise geprüft | ✅ Vollständig (über Ansible) |
+| Firewall-Konfiguration (UFW) | ✅ Ja | 🔶 Teilweise (nur iptables) | 🔶 Teilweise | ✅ Ja |
+| Automatische Updates (unattended-upgrades) | ✅ Ja | 🔶 Teilweise | ❌ Nein | ✅ Ja |
+| Fail2Ban oder SSHGuard Integration | ✅ Ja (optional) | ✅ Ja | ❌ Nein | ✅ Ja |
+| ClamAV Antivirus-Integration (optional) | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Optimiert für Debian und Ubuntu | ✅ Ja | 🔶 Teilweise | ✅ Ja | ✅ Ja |
+| Automatische Backups vor Änderungen | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
+| Dry-Run Modus (Ausführung simulieren) | ✅ Ja (vollständig unterstützt) | 🔶 Minimal (über Ansible --check) | ❌ Nein | 🔶 Teilweise (Ansible --check) |
+| Auditd/Compliance-Fokus | ❌ Bewusst ausgeschlossen | 🔶 Teilweise | ✅ Ja | ✅ Ja |
+
+✅ **Legende**:
+- ✅ Ja: Vollständig unterstützt
+- 🔶 Teilweise: Eingeschränkt oder unvollständig unterstützt
+- ❌ Nein: Nicht verfügbar
 
 ---
 
