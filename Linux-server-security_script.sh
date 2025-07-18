@@ -2221,7 +2221,7 @@ configure_clamav() {
 
 
 # --- Main Script Execution ---
-echo "=== Interactive Linux Server Security Script v1.7.0 ===" # Version Bump
+echo "=== Interactive Linux Server Security Script v1.7.3 ===" # Version Bump
 echo "Checks and configures security settings."
 echo "Log file: $SCRIPT_LOG_FILE"
 echo "Backups: Files ending with '$BACKUP_SUFFIX'"
@@ -2240,7 +2240,7 @@ if ! $DRY_RUN; then
     log_dir=$(dirname "$SCRIPT_LOG_FILE")
     if [[ ! -d "$log_dir" ]]; then mkdir -p "$log_dir" || { error "Cannot create log directory: $log_dir"; exit 1; }; fi
     if ! touch "$SCRIPT_LOG_FILE" &>/dev/null; then error "Cannot write to log file: $SCRIPT_LOG_FILE"; exit 1; fi
-    log_change "SCRIPT_STARTED Version=1.7.0" # Log start only if not dry run
+    log_change "SCRIPT_STARTED Version=1.7.3" # Log start only if not dry run
 else
     info "DRY-RUN: Logging to $SCRIPT_LOG_FILE is disabled."
 fi
