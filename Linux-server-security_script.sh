@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === Interactive Linux Server Security Script ===
-# Version: 2.0.6
+# Version: 2.0.7
 # Original Author: Paul Schumacher
 # Purpose: Check and harden Debian/Ubuntu servers
 # License: MIT – Free to use, but at your own risk. NO WARRANTY.
@@ -52,11 +52,18 @@
 # Fixes in v2.0.6:
 # - Fixed ask_yes_no stdin conflict: reads from /dev/tty to prevent
 #   infinite loop when called inside while-read pipelines (UFW port review)
+#
+# Fixes in v2.0.7:
+# - detect_ssh_service: checks active units first before unit-file list
+#   (fixes "sshd.service not found" on Ubuntu where service is named 'ssh')
+# - configure_ssh_hardening: changes_to_apply explicitly initialized as
+#   empty associative array to prevent "unbound variable" with set -u
+# - configure_msmtp: test mail uses -r flag to set correct From address
 
 set -uo pipefail
 
 # --- Configuration ---
-readonly SCRIPT_VERSION="2.0.6"
+readonly SCRIPT_VERSION="2.0.7"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly BACKUP_SUFFIX=".security_script_backup"
@@ -105,14 +112,21 @@ if $DRY_RUN; then
 fi
 
 # --- Determine SSH service name ---
+# FIX v2.0.7: Check active units FIRST (most reliable), then fall back to
+# unit-file list. On Ubuntu the service is 'ssh', not 'sshd', even though
+# 'sshd.service' appears as an alias in list-unit-files.
 detect_ssh_service() {
-    if systemctl list-unit-files 2>/dev/null | grep -q "^ssh\.service"; then
+    if systemctl is-active --quiet ssh 2>/dev/null; then
+        SSH_SERVICE="ssh"
+    elif systemctl is-active --quiet sshd 2>/dev/null; then
+        SSH_SERVICE="sshd"
+    elif systemctl list-unit-files 2>/dev/null | grep -q "^ssh\.service"; then
         SSH_SERVICE="ssh"
     elif systemctl list-unit-files 2>/dev/null | grep -q "^sshd\.service"; then
         SSH_SERVICE="sshd"
     else
-        SSH_SERVICE="sshd"
-        warn "Could not detect SSH service name, assuming 'sshd'."
+        SSH_SERVICE="ssh"
+        warn "Could not detect SSH service name, assuming 'ssh'."
     fi
 }
 
@@ -1107,12 +1121,13 @@ EOF
     success "MSMTP configuration saved."
     log_change "ADDED_FILE:$config_file_path"
 
-    # Test email
+    # FIX v2.0.7: Test mail uses -r flag to correctly set the From address,
+    # ensuring the mail is sent from (and to) the configured smtp_from address.
     if is_package_installed "mailutils" && ask_yes_no "Send test email to '$smtp_from'?" "y"; then
-        local mail_cmd=(mail -s "MSMTP Test $(date)" "$smtp_from")
+        local mail_cmd=(mail -s "MSMTP Test $(date)" -r "$smtp_from" "$smtp_from")
         if echo "Test email from Linux Security Script." | \
            sudo -u "$config_owner" "${mail_cmd[@]}" 2>/dev/null; then
-            success "Test email sent."
+            success "Test email sent to '$smtp_from'."
             log_change "SEND_TEST_MAIL:$smtp_from"
         else
             warn "Test email failed. Check $logfile_path"
@@ -1197,7 +1212,9 @@ configure_ssh_hardening() {
         fi
     fi
 
-    declare -A changes_to_apply
+    # FIX v2.0.7: Explicitly initialize as empty associative array to avoid
+    # "unbound variable" error with set -u when no changes are collected.
+    declare -A changes_to_apply=()
 
     for param in "${!ssh_recommendations[@]}"; do
         local current recommended ask_user=true
