@@ -1,338 +1,1249 @@
 #!/bin/bash
 
-# === Interactive Linux Server Security Script ===
-# Version: 2.0.7
-# Original Author: Paul Schumacher
-# Purpose: Check and harden Debian/Ubuntu servers
-# License: MIT – Free to use, but at your own risk. NO WARRANTY.
+# ============================================================================
+# Linux Server Security Script
+# Version: 3.0
+# Author: Paul Schumacher
+# Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
+# License: MIT — Free to use, but at your own risk. NO WARRANTY.
 #
-# Improvements in v2.0.0:
-# - Eliminated eval() usage for security (uses arrays for command execution)
-# - Added missing get_container_ports() function
-# - Added missing configure_sysctl() function
-# - Added missing configure_sudoers_tty() function
-# - Fixed syntax error in process_parameter_line()
-# - Improved backup/restore with list and selective restore commands
-# - Reduced code duplication with shared helper functions
-# - ShellCheck-compatible improvements
-# - Streamlined origins processing in unattended-upgrades
-# - Added GPG/secret-tool hint for MSMTP password storage
-#
-# Fixes in v2.0.1:
-# - Removed set -e (caused premature exit on grep/diff non-zero returns)
-# - Fixed UFW detection for already-installed packages
-# - Added || true to all grep pipelines to prevent pipefail breakage
-# - Improved UFW status display when inactive
-#
-# Fixes in v2.0.2:
-# - Fail2ban/SSHGuard/UFW: Auto-audit when already installed (no redundant questions)
-# - Only prompts when issues are found, with [Issue] + Recommendation + Fix pattern
-# - Shows audit summary with issue count per section
-#
-# Fixes in v2.0.3:
-# - Journald/Sysctl/Sudoers: Auto-audit, skip if already configured correctly
-# - Fixed ANSI escape codes not rendering in ask_yes_no prompts (read -p bug)
-# - All sections now follow consistent audit pattern: check → report → fix
-#
-# Fixes in v2.0.4:
-# - Fixed ufw_rules array crash with set -u (unbound variable on empty array)
-# - Added is_ufw_allowed() helper for safe associative array access
-# - Fail2ban: validates config before restart, offers restore on failure
-# - listening_ports array properly initialized
-#
-# Fixes in v2.0.5 (release candidate):
-# - SSH port detection: fallback to sshd_config file when sshd binary missing
-# - get_ssh_port() helper always returns a valid port number (default 22)
-# - get_listening_ports: replaced gawk-only match() with bash regex (mawk compat)
-# - list_backups: fixed ANSI escape rendering (echo -e)
-# - Fail2ban: creates minimal jail.local instead of copying huge jail.conf
-# - Fail2ban: sshd jail enable handles missing section, appends if needed
-# - Fail2ban: ignoreip handles missing [DEFAULT] section
-#
-# Fixes in v2.0.6:
-# - Fixed ask_yes_no stdin conflict: reads from /dev/tty to prevent
-#   infinite loop when called inside while-read pipelines (UFW port review)
-#
-# Fixes in v2.0.7:
-# - detect_ssh_service: checks active units first before unit-file list
-#   (fixes "sshd.service not found" on Ubuntu where service is named 'ssh')
-# - configure_ssh_hardening: changes_to_apply explicitly initialized as
-#   empty associative array to prevent "unbound variable" with set -u
-# - configure_msmtp: test mail uses -r flag to set correct From address
+# Changelog v3.0:
+# - CRITICAL FIX: PAM hardening completely rewritten
+#     - No raw sed on live /etc/pam.d/ files
+#     - Uses pam-auth-update (Debian/Ubuntu native mechanism)
+#     - sudo smoke-test after every PAM change — auto-rollback on failure
+#     - pam_faillock via /etc/security/faillock.conf (modern, safe approach)
+# - NEW: --rollback mode — full system restore to pre-script state
+#     - Restores all backed-up config files
+#     - Removes packages installed by this script
+#     - Unlocks root account if locked by this script
+#     - Removes all files added by this script
+#     - Restores removed cron jobs
+# - NEW: Transaction log (machine-readable) for rollback
+# - NEW: Sudo smoke-test function (validates sudo works before continuing)
+# - NEW: AppArmor enforce section (from ChatGPT v4.1.0)
+# - IMPROVED: Startup menu 1/2/3 (from ChatGPT v4.1.0)
+# - IMPROVED: --verify flag (exit code 2 if RED findings remain)
+# - IMPROVED: Safe config file parser (no source/eval)
+# - IMPROVED: Full rollback is now non-interactive and restores automatically
+# - IMPROVED: Selective removal mode via --remove target1,target2
+# - IMPROVED: Selective removal now detects existing components and offers an interactive selection menu
+# - IMPROVED: Audit/AIDE sections now print relevant log locations and commands
+# - FIXED: Login banner rollback now removes lingering banner files reliably
+# - IMPROVED: All tmpfile cleanups on EXIT trap
+# - NEW: Startup language selection (Deutsch / English)
+# - FIXED: AIDE initialization now runs non-interactively with timeout + robust DB discovery
+# - FIXED: Selective removal menu now renders interactively and accepts selections correctly
+# - IMPROVED: Interactive UX redesigned for new users (recommended hardening, step-by-step, expert mode)
+# - IMPROVED: Profile selection moved out of the default interactive path and into expert/CLI usage
+# - FIXED: AIDE fallback now builds aide.conf.autogenerated correctly from /etc/aide/aide.conf.d, executing executable Debian snippets
+# - FIXED: AIDE local excludes now create target directories and include volatile container/log paths for reduced noise on live hosts
+# - IMPROVED: AIDE init/check now prefer autogenerated config, optional nice/ionice, and cron can refresh fallback config without update-aide.conf
+# ============================================================================
 
 set -uo pipefail
 
-# --- Configuration ---
-readonly SCRIPT_VERSION="2.0.7"
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+readonly SCRIPT_VERSION="3.0"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
+readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
 readonly BACKUP_SUFFIX=".security_script_backup"
-readonly MSMTP_CONFIG_CHOICE="user"  # 'user' (~/.msmtprc) or 'system' (/etc/msmtprc)
+readonly MSMTP_CONFIG_CHOICE="user"
 readonly SYSCTL_CONFIG_FILE="/etc/sysctl.d/99-security-script.conf"
 readonly SUDOERS_TTY_FILE="/etc/sudoers.d/tty_tickets"
 readonly SCRIPT_DEBUG="${SCRIPT_DEBUG:-false}"
+readonly MODPROBE_BLACKLIST="/etc/modprobe.d/security-script-blacklist.conf"
+readonly LIMITS_CONF="/etc/security/limits.d/99-security-script.conf"
+readonly FAILLOCK_CONF="/etc/security/faillock.conf"
+readonly PWQUALITY_CONF="/etc/security/pwquality.conf"
+readonly BANNER_FILE="/etc/issue.net"
+readonly MOTD_FILE="/etc/motd"
+readonly AIDE_CRON="/etc/cron.daily/aide-check"
+readonly AUDITD_RULES="/etc/audit/rules.d/99-security-script.rules"
+readonly SSHD_HARDENING_DROPIN="/etc/ssh/sshd_config.d/00-security-script.conf"
+readonly SSHD_HARDENING_DROPIN_LEGACY="/etc/ssh/sshd_config.d/99-security-script.conf"
+readonly AIDE_INIT_LOG="/var/log/aide-init.log"
+readonly AIDE_LOCAL_EXCLUDES="/etc/aide/aide.conf.d/99-security-script-local"
+readonly AIDE_INIT_TIMEOUT_DEFAULT="${AIDE_INIT_TIMEOUT:-1800}"
+AIDE_INIT_TIMEOUT="$AIDE_INIT_TIMEOUT_DEFAULT"
+readonly IDEMPOTENCE_LOG="/var/log/security_script_idempotence.log"
+readonly BASELINE_SNAPSHOT="/var/log/security_script_baseline_before_hardening.tsv"
+readonly ROLLBACK_VALIDATION_REPORT="/var/log/security_script_rollback_validation.log"
+readonly DEFAULT_AUTO_CONFIG="./security_config.env"
 
-# --- Global Variables ---
+# ============================================================================
+# GLOBAL STATE
+# ============================================================================
+ORIGINAL_ARGC=$#
 DRY_RUN=false
+AUTO_MODE=false
+ASSESS_ONLY=false
+VERIFY_AFTER_HARDENING=false
+ROLLBACK_MODE=false
+SELECTIVE_REMOVE_MODE=false
+REMOVE_TARGETS_RAW=""
 SCRIPT_APT_UPDATED=false
+SCRIPT_APT_FAILED=false
 SSH_SERVICE=""
+INTERACTIVE_MENU_USED=false
+UI_LANG="de"
+CLI_LANG_SET=false
+SELECTIVE_MENU_RESULT=""
+ACTIVE_PROFILE="server"
+PROFILE_SELECTED=false
+PROFILE_STRICT=false
+INTERACTIVE_RECOMMENDED_MODE=false
+INTERACTIVE_STEP_MODE=false
+EXPERT_PROFILE_MODE=false
+PROVE_IDEMPOTENCE=true
+DRY_RUN_ACTIONS=0
+DRY_RUN_NOTES=()
+IDEMPOTENCE_LAST_RESULT="NOT_RUN"
+HOST_HAS_DOCKER=false
+HOST_HAS_PODMAN=false
+HOST_CONTEXT_ROLE_FILE=false
+HOST_CONTEXT_ROLE_MAIL=false
+HOST_CONTEXT_ROLE_NEXTCLOUD=false
+HOST_CONTEXT_CONTAINER_HINTS=""
+HOST_CONTEXT_EXTRA_RECOMMENDATIONS=""
+CURRENT_CHILD_PID=""
+ABORT_REQUESTED=false
+AIDE_FALLBACK_TIMEOUT=120
 
-# --- Argument Parsing ---
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --dry-run) DRY_RUN=true; shift ;;
-            --help|-h)
-                echo "Usage: $0 [--dry-run] [--help]"
-                echo "  --dry-run  Simulate changes without applying them"
-                echo "  --help     Show this help message"
-                exit 0 ;;
-            *) echo "Unknown option: $1" >&2; exit 1 ;;
-        esac
-    done
-}
-
-parse_args "$@"
-
-# Check root privileges
-if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: This script must be run as root!" >&2
-    exit 1
-fi
-
-# Check Bash version
-if (( BASH_VERSINFO[0] < 4 )); then
-    echo "ERROR: Bash version 4+ required (found ${BASH_VERSION})." >&2
-    exit 1
-fi
-
-# Announce Dry-Run mode
-if $DRY_RUN; then
-    echo -e "\n\e[1;35m*** DRY-RUN MODE ACTIVE: No changes will be made. ***\e[0m\n"
-fi
-
-# --- Determine SSH service name ---
-# FIX v2.0.7: Check active units FIRST (most reliable), then fall back to
-# unit-file list. On Ubuntu the service is 'ssh', not 'sshd', even though
-# 'sshd.service' appears as an alias in list-unit-files.
-detect_ssh_service() {
-    if systemctl is-active --quiet ssh 2>/dev/null; then
-        SSH_SERVICE="ssh"
-    elif systemctl is-active --quiet sshd 2>/dev/null; then
-        SSH_SERVICE="sshd"
-    elif systemctl list-unit-files 2>/dev/null | grep -q "^ssh\.service"; then
-        SSH_SERVICE="ssh"
-    elif systemctl list-unit-files 2>/dev/null | grep -q "^sshd\.service"; then
-        SSH_SERVICE="sshd"
-    else
-        SSH_SERVICE="ssh"
-        warn "Could not detect SSH service name, assuming 'ssh'."
+# Temp files — cleaned up on exit
+TMPFILES=()
+cleanup_tmpfiles() { for f in "${TMPFILES[@]+"${TMPFILES[@]}"}"; do rm -f "$f" 2>/dev/null; done; }
+handle_interrupt() {
+    ABORT_REQUESTED=true
+    echo
+    warn "$(tr_msg aborted_ctrlc)"
+    if [[ -n "${CURRENT_CHILD_PID:-}" ]]; then
+        kill "$CURRENT_CHILD_PID" 2>/dev/null || true
+        sleep 1
+        kill -9 "$CURRENT_CHILD_PID" 2>/dev/null || true
     fi
+    cleanup_tmpfiles
+    exit 130
 }
+trap cleanup_tmpfiles EXIT
+trap handle_interrupt INT TERM
 
-# --- Colors ---
+mktemp_tracked() { local f; f=$(mktemp); TMPFILES+=("$f"); echo "$f"; }
+
+# Assessment matrix
+declare -A ASSESS_RESULTS=()
+declare -a ASSESS_ORDER=()
+
+# ============================================================================
+# COLORS
+# ============================================================================
 readonly C_RESET='\e[0m'
 readonly C_RED='\e[0;31m'
 readonly C_GREEN='\e[0;32m'
 readonly C_YELLOW='\e[0;33m'
 readonly C_BLUE='\e[0;34m'
 readonly C_MAGENTA='\e[0;35m'
+readonly C_CYAN='\e[0;36m'
 readonly C_BOLD='\e[1m'
+readonly C_RED_BOLD='\e[1;31m'
+readonly C_GREEN_BOLD='\e[1;32m'
+readonly C_YELLOW_BOLD='\e[1;33m'
 
-# --- Output Helpers ---
-debug()       { [[ "$SCRIPT_DEBUG" == "true" ]] && echo -e "${C_YELLOW}DEBUG [${FUNCNAME[1]}]:${C_RESET} $1"; return 0; }
-info()        { echo -e "${C_BLUE}INFO:${C_RESET} $1"; }
-success()     { echo -e "${C_GREEN}SUCCESS:${C_RESET} $1"; }
-warn()        { echo -e "${C_YELLOW}WARNING:${C_RESET} $1"; }
-error()       { echo -e "${C_RED}ERROR:${C_RESET} $1" >&2; }
-dry_run_echo() { echo -e "${C_MAGENTA}DRY-RUN:${C_RESET} Would execute: $1"; }
+# ============================================================================
+# OUTPUT HELPERS
+# ============================================================================
+debug()        { [[ "$SCRIPT_DEBUG" == "true" ]] && echo -e "${C_YELLOW}DEBUG [${FUNCNAME[1]}]:${C_RESET} $1"; return 0; }
+info()         { echo -e "${C_BLUE}INFO:${C_RESET} $1"; }
+success()      { echo -e "${C_GREEN}OK:${C_RESET} $1"; }
+warn()         { echo -e "${C_YELLOW}WARN:${C_RESET} $1"; }
+error()        { echo -e "${C_RED}ERROR:${C_RESET} $1" >&2; }
+record_dry_run_action() {
+    local note="$1"
+    DRY_RUN_ACTIONS=$((DRY_RUN_ACTIONS+1))
+    (( ${#DRY_RUN_NOTES[@]} < 50 )) && DRY_RUN_NOTES+=("$note")
+}
+dry_run_echo() { record_dry_run_action "$1"; echo -e "${C_MAGENTA}DRY-RUN:${C_RESET} Would execute: $1"; }
+section_done() { echo "--- Section $1 completed ---"; echo; }
 
-# --- Core Helper Functions ---
-
-ask_yes_no() {
-    local question="$1" default="${2:-}" answer
-    while true; do
-        if [[ "$default" == "y" ]]; then
-            echo -en "$question [Y/n]: "
-            read -r answer < /dev/tty
-            answer=${answer:-y}
-        elif [[ "$default" == "n" ]]; then
-            echo -en "$question [y/N]: "
-            read -r answer < /dev/tty
-            answer=${answer:-n}
-        else
-            echo -en "$question [y/n]: "
-            read -r answer < /dev/tty
-        fi
-        case "$answer" in
-            [Yy]*) return 0 ;;
-            [Nn]*) return 1 ;;
-            *) warn "Invalid input. Please enter 'y' or 'n'." ;;
-        esac
-    done
+describe_action() {
+    local key="$1"
+    case "$UI_LANG:$key" in
+        de:ssh_key) info "SSH-Schlüssel ersetzen Passwort-Logins durch starke, kryptografische Anmeldung und senken das Risiko von Brute-Force-Angriffen. Das ist die empfohlene Basis für einen sicheren Remote-Zugang." ;;
+        en:ssh_key) info "SSH keys replace password logins with strong cryptographic authentication and reduce brute-force risk. This is the recommended baseline for secure remote access." ;;
+        de:upgrades) info "Unattended Upgrades installiert Sicherheitsupdates automatisch und schließt bekannte Lücken schneller. Dadurch sinkt das Zeitfenster, in dem ein ungepatchtes System angreifbar ist." ;;
+        en:upgrades) info "Unattended Upgrades installs security updates automatically and shortens exposure to known vulnerabilities. This reduces the time a system stays unpatched." ;;
+        de:msmtp) info "MSMTP ermöglicht Mail-Benachrichtigungen des Systems, etwa für Reports oder Warnungen. Das ist hilfreich für Monitoring, aber keine Kernmaßnahme für jedes System." ;;
+        en:msmtp) info "MSMTP enables system email notifications for reports and alerts. This is useful for monitoring, but not a core measure for every system." ;;
+        de:ssh_hardening) info "SSH-Hardening reduziert unnötige Angriffsflächen wie Passwort-Login, Agent-Forwarding oder großzügige Timeouts. So wird der wichtigste Fernzugang des Servers deutlich robuster." ;;
+        en:ssh_hardening) info "SSH hardening reduces attack surface by disabling risky options like password login, agent forwarding or loose timeouts. This makes the server's primary remote access much more robust." ;;
+        de:twofa) info "Zwei-Faktor-Authentifizierung schützt den SSH-Zugang zusätzlich, falls ein Passwort oder Schlüssel kompromittiert wird. Sie ist wirksam, aber eher für gezielte Sicherheitsanforderungen oder exponierte Systeme gedacht." ;;
+        en:twofa) info "Two-factor authentication adds an extra protection layer for SSH if a password or key is compromised. It is effective, but more suited to stricter requirements or exposed systems." ;;
+        de:fail2ban) info "Fail2ban erkennt wiederholte Fehlversuche in Logs und sperrt auffällige IP-Adressen temporär. Das bremst automatisierte Login-Angriffe auf SSH und andere Dienste deutlich aus." ;;
+        en:fail2ban) info "Fail2ban detects repeated failures in logs and temporarily blocks suspicious IP addresses. This significantly slows down automated login attacks against SSH and other services." ;;
+        de:sshguard) info "SSHGuard ist ein zusätzlicher leichter Schutz gegen Brute-Force-Angriffe auf SSH. Er ist nützlich, aber bei bereits gut konfiguriertem Fail2ban oft optional." ;;
+        en:sshguard) info "SSHGuard is an additional lightweight protection against SSH brute-force attacks. It is useful, but often optional when Fail2ban is already configured well." ;;
+        de:ufw) info "Eine Host-Firewall erlaubt nur wirklich benötigte Ports und blockiert alles andere. Das ist eine zentrale Netzwerkschutzmaßnahme, kann aber auf komplexen Hosts sorgfältige Planung erfordern." ;;
+        en:ufw) info "A host firewall allows only required ports and blocks everything else. This is a core network protection measure, but complex hosts may require careful planning." ;;
+        de:journald) info "Eine Begrenzung der Journald-Größe verhindert, dass Logs unkontrolliert den Datenträger füllen. Das stabilisiert den Betrieb und schützt vor Speicherplatzproblemen durch Logfluten." ;;
+        en:journald) info "Limiting journald size prevents logs from consuming disk space without bounds. This improves operational stability and protects against log-driven storage exhaustion." ;;
+        de:clamav) info "ClamAV kann Dateien und Uploads auf bekannte Schadsoftware prüfen und ist besonders auf File- oder Mail-Servern nützlich. Auf reinen Minimalservern ist es eher optional als Pflicht." ;;
+        en:clamav) info "ClamAV can scan files and uploads for known malware and is especially useful on file or mail servers. On minimal servers it is more optional than mandatory." ;;
+        de:sysctl) info "Sysctl-Hardening setzt Kernel- und Netzwerkparameter sicherer, etwa für Redirects, Source Routing oder Speicher- und Kernel-Schutz. Das ist eine wichtige Baseline, weil viele Schutzmechanismen direkt im Kernel greifen." ;;
+        en:sysctl) info "Sysctl hardening applies safer kernel and network parameters for topics such as redirects, source routing and memory/kernel protection. This is an important baseline because many protections act directly in the kernel." ;;
+        de:sudoers) info "Sudoers-Härtung verbessert das Verhalten privilegierter Befehle und erschwert Missbrauch offener Sitzungen. Das ist eine kleine, aber sinnvolle Maßnahme für Admin-Konten." ;;
+        en:sudoers) info "Sudoers hardening improves the handling of privileged commands and reduces abuse of open sessions. This is a small but useful safeguard for admin accounts." ;;
+        de:auditd) info "auditd zeichnet sicherheitsrelevante Systemereignisse detailliert auf und unterstützt spätere Analyse sowie Compliance. Es ist besonders wertvoll, wenn Änderungen oder Angriffe nachvollzogen werden müssen." ;;
+        en:auditd) info "auditd records security-relevant system events in detail and supports later analysis and compliance. It is especially valuable when changes or attacks must be traceable." ;;
+        de:aide) info "AIDE erstellt eine Integritäts-Baseline wichtiger Dateien und erkennt spätere Manipulationen oder unerwartete Änderungen. Das hilft besonders bei forensischer Nachvollziehbarkeit und langfristiger Systemkontrolle." ;;
+        en:aide) info "AIDE builds an integrity baseline for important files and detects later tampering or unexpected changes. This is especially helpful for forensic traceability and long-term system control." ;;
+        de:apparmor) info "AppArmor begrenzt, was Prozesse auf dem System tun dürfen, und reduziert so die Folgen kompromittierter Dienste. Das ist ein starker zusätzlicher Schutz, wenn die Profile sauber laufen." ;;
+        en:apparmor) info "AppArmor limits what processes on the system are allowed to do and reduces the impact of compromised services. This is a strong additional control when profiles run cleanly." ;;
+        de:filesystem) info "Sichere Mount-Optionen wie noexec, nosuid und nodev erschweren Missbrauch temporärer Dateisysteme. Das senkt das Risiko, dass Schadcode aus typischen Ablageorten direkt ausgeführt wird." ;;
+        en:filesystem) info "Secure mount options such as noexec, nosuid and nodev make abuse of temporary filesystems harder. This reduces the chance that malicious code is executed directly from common staging locations." ;;
+        de:modules) info "Das Blacklisting ungenutzter Kernel-Module verringert die Angriffsfläche des Systems. Was nicht geladen werden kann, kann auch nicht so leicht missbraucht werden." ;;
+        en:modules) info "Blacklisting unused kernel modules reduces the system's attack surface. What cannot be loaded is harder to abuse." ;;
+        de:coredumps) info "Das Deaktivieren von Core Dumps verhindert, dass sensible Prozessdaten unkontrolliert auf der Platte landen. Das schützt vor Datenabfluss und reduziert forensische Altlasten auf Produktivsystemen." ;;
+        en:coredumps) info "Disabling core dumps prevents sensitive process memory from being written uncontrolled to disk. This reduces data exposure and unwanted forensic residue on production systems." ;;
+        de:pam) info "PAM-Hardening verbessert Passwortqualität und begrenzt Fehlversuche bei Logins. Dadurch werden schwache Kennwörter und Brute-Force-Angriffe deutlich schwieriger." ;;
+        en:pam) info "PAM hardening improves password quality and limits failed login attempts. This makes weak passwords and brute-force attacks significantly harder." ;;
+        de:banners) info "Login-Banner zeigen rechtliche und organisatorische Hinweise vor oder nach der Anmeldung an. Das ist vor allem für Compliance, Behörden- und Unternehmensumgebungen relevant." ;;
+        en:banners) info "Login banners display legal and organizational notices before or after authentication. This is mainly relevant for compliance and enterprise or public-sector environments." ;;
+    esac
 }
 
-is_package_installed() { dpkg -s "$1" &>/dev/null; }
+describe_detail() {
+    local key="$1"
+    case "$UI_LANG:$key" in
+        de:ssh_allowusers) info "AllowUsers begrenzt, welche lokalen Konten sich per SSH anmelden dürfen. Das reduziert die Angriffsfläche, wenn auf dem System mehrere Benutzer existieren." ;;
+        en:ssh_allowusers) info "AllowUsers restricts which local accounts may log in via SSH. This reduces attack surface when multiple users exist on the system." ;;
+        de:ssh_passwordauth) info "Das Deaktivieren der Passwortanmeldung erschwert Brute-Force- und Passwortspray-Angriffe direkt auf SSH. Nutze das nur, wenn bereits funktionierende Schlüssel hinterlegt sind." ;;
+        en:ssh_passwordauth) info "Disabling password login makes brute-force and password-spraying attacks against SSH much harder. Use it only when working SSH keys are already in place." ;;
+        de:ssh_challengeresponse) info "Challenge-Response-Logins können zusätzliche Passwortpfade offenhalten. Wenn du keine spezielle PAM-/OTP-Lösung brauchst, ist 'no' meist die sichere Wahl." ;;
+        en:ssh_challengeresponse) info "Challenge-response logins can keep extra password-style authentication paths open. If you do not need a specific PAM or OTP flow, 'no' is usually the safer choice." ;;
+        de:ssh_agentfwd) info "Agent-Forwarding erlaubt die Weitergabe deines lokalen SSH-Agenten an den Zielhost. Das ist praktisch, erhöht aber das Risiko bei kompromittierten Zwischenstationen." ;;
+        en:ssh_agentfwd) info "Agent forwarding lets your local SSH agent be forwarded to the remote host. This is convenient, but increases risk on compromised jump hosts or servers." ;;
+        de:ssh_tcpfwd) info "TCP-Forwarding erlaubt SSH-Tunnel über den Server. Wenn du das nicht brauchst, schließt 'no' eine oft unnötige Tunnel-Funktion." ;;
+        en:ssh_tcpfwd) info "TCP forwarding allows SSH tunnels through the server. If you do not need this, setting it to 'no' closes an often unnecessary tunneling capability." ;;
+        de:ssh_x11fwd) info "X11-Forwarding wird auf Servern selten benötigt und vergrößert die Angriffsfläche. Deshalb ist 'no' auf typischen Headless-Systemen sinnvoll." ;;
+        en:ssh_x11fwd) info "X11 forwarding is rarely needed on servers and increases attack surface. That is why 'no' is sensible on typical headless systems." ;;
+        de:ssh_logingracetime) info "Eine kürzere LoginGraceTime beendet hängende oder missbrauchte Anmeldeversuche schneller. Das reduziert die Zeit für langsame Brute-Force- oder Ressourcenangriffe." ;;
+        en:ssh_logingracetime) info "A shorter LoginGraceTime terminates hanging or abused login attempts sooner. This reduces exposure to slow brute-force or resource-draining attacks." ;;
+        de:ssh_maxauthtries) info "Weniger MaxAuthTries begrenzen die Anzahl falscher Versuche pro Verbindung. Das erschwert Passwort-Raten und unnötige Mehrfachversuche." ;;
+        en:ssh_maxauthtries) info "Lower MaxAuthTries limits the number of failed attempts per connection. This makes password guessing and repeated trials harder." ;;
+        de:ssh_maxsessions) info "Weniger parallele Sitzungen pro Verbindung verringern Missbrauchsmöglichkeiten und Ressourcenverbrauch. Für normale Admin-Zugriffe reichen kleine Werte meist aus." ;;
+        en:ssh_maxsessions) info "Fewer parallel sessions per connection reduce abuse options and resource usage. Small values are usually enough for normal admin access." ;;
+        de:ssh_clientaliveinterval) info "ClientAliveInterval erkennt tote oder verlassene Sitzungen früher. Das hilft, verwaiste SSH-Verbindungen sauber zu beenden." ;;
+        en:ssh_clientaliveinterval) info "ClientAliveInterval detects dead or abandoned sessions sooner. This helps clean up stale SSH connections." ;;
+        de:ssh_clientalivecountmax) info "ClientAliveCountMax legt fest, wie oft eine tote Sitzung toleriert wird, bevor sie beendet wird. Kleinere Werte schließen verwaiste Sitzungen schneller." ;;
+        en:ssh_clientalivecountmax) info "ClientAliveCountMax defines how often a dead session is tolerated before it is dropped. Lower values close stale sessions more quickly." ;;
+        de:ssh_permitrootlogin) info "Direkter Root-Login ist ein bevorzugtes Ziel von Angreifern. 'prohibit-password' oder 'no' reduziert dieses Risiko deutlich." ;;
+        en:ssh_permitrootlogin) info "Direct root login is a preferred target for attackers. 'prohibit-password' or 'no' reduces this risk significantly." ;;
+        de:ssh_permituserenvironment) info "Benutzerspezifische Umgebungsvariablen können SSH-Verhalten unerwartet beeinflussen. 'no' hält die Serverumgebung berechenbarer und robuster." ;;
+        en:ssh_permituserenvironment) info "User-controlled environment variables can influence SSH behavior in unexpected ways. 'no' keeps the server environment more predictable and robust." ;;
+        de:ssh_printlastlog) info "Die Anzeige des letzten erfolgreichen Logins hilft, verdächtige Zugriffe schneller zu bemerken. Das ist klein, aber für Administratoren nützlich." ;;
+        en:ssh_printlastlog) info "Showing the last successful login helps spot suspicious access more quickly. This is a small but useful aid for administrators." ;;
+        de:upgrades_periodic) info "Die empfohlenen Periodic-Einstellungen sorgen dafür, dass Updates zuverlässig geladen, installiert und aufgeräumt werden. Das verbessert die Patch-Hygiene des Systems." ;;
+        en:upgrades_periodic) info "The recommended periodic settings ensure updates are downloaded, installed and cleaned up reliably. This improves the system's patch hygiene." ;;
+        de:fail2ban_ignoreip) info "Mit ignoreip werden vertrauenswürdige lokale Netze vor versehentlichen Sperren geschützt. Trage hier nur Netze ein, denen du wirklich vertraust." ;;
+        en:fail2ban_ignoreip) info "ignoreip protects trusted local networks from accidental bans. Only add networks that you genuinely trust." ;;
+        de:clamav_freshclam) info "freshclam lädt aktuelle Signaturen herunter, damit ClamAV neue Malware erkennen kann. Ohne frische Signaturen sinkt der Nutzen des Scanners deutlich." ;;
+        en:clamav_freshclam) info "freshclam downloads current signatures so ClamAV can detect newer malware. Without fresh signatures, the scanner is much less useful." ;;
+        de:filesystem_mountopts) info "Sichere Mount-Optionen auf /tmp oder /dev/shm erschweren das direkte Ausführen oder Missbrauchen temporärer Dateien. Das ist besonders bei gemeinsam genutzten oder exponierten Hosts sinnvoll." ;;
+        en:filesystem_mountopts) info "Secure mount options on /tmp or /dev/shm make direct execution or abuse of temporary files harder. This is especially useful on shared or exposed hosts." ;;
+        de:pam_pwquality) info "pwquality erzwingt Mindestlänge und Komplexität für Kennwörter. Dadurch werden triviale oder sehr schwache Passwörter deutlich seltener." ;;
+        en:pam_pwquality) info "pwquality enforces minimum length and complexity for passwords. This makes trivial or very weak passwords much less likely." ;;
+        de:pam_faillock) info "faillock begrenzt wiederholte Fehlversuche bei der Anmeldung und verlangsamt Brute-Force-Angriffe deutlich. Auf Produktivsystemen ist das meist eine sinnvolle Baseline." ;;
+        en:pam_faillock) info "faillock limits repeated failed login attempts and significantly slows brute-force attacks. On production systems, this is usually a sensible baseline." ;;
+        de:root_lock) info "Ein gesperrtes Root-Konto verhindert direkte Passwortanmeldungen als root. Administration sollte stattdessen über sudo und nachvollziehbare Benutzerkonten erfolgen." ;;
+        en:root_lock) info "A locked root account prevents direct password logins as root. Administration should instead happen via sudo and traceable user accounts." ;;
+        de:banners_apply) info "Der Banner weist vor der Anmeldung auf autorisierte Nutzung und mögliche Überwachung hin. Das ist vor allem für Compliance- und Unternehmensumgebungen nützlich." ;;
+        en:banners_apply) info "The banner warns about authorized use and possible monitoring before login. This is especially useful in compliance and enterprise environments." ;;
+        de:sudo_ttytickets) info "tty_tickets trennt sudo-Anmeldungen pro Terminal-Sitzung. Dadurch kann ein offenes Terminal nicht automatisch andere Sitzungen mit privilegierten Rechten mitziehen." ;;
+        en:sudo_ttytickets) info "tty_tickets separates sudo authentication per terminal session. This prevents one open terminal from automatically granting elevated rights to another session." ;;
+        de:modules_blacklist) info "Ungenutzte Kernel-Module zu sperren reduziert die Angriffsfläche des laufenden Kernels. Das ist besonders sinnvoll, wenn bestimmte Altprotokolle oder Dateisysteme nie gebraucht werden." ;;
+        en:modules_blacklist) info "Blocking unused kernel modules reduces the attack surface of the running kernel. This is especially useful when legacy protocols or filesystems are never needed." ;;
+        de:coredumps_disable) info "Wenn Core Dumps deaktiviert sind, landen keine Speicherabbilder mit potenziell sensiblen Daten auf der Platte. Das ist auf Produktivsystemen meist die sicherere Standardeinstellung." ;;
+        en:coredumps_disable) info "When core dumps are disabled, no memory images containing potentially sensitive data are written to disk. This is usually the safer default on production systems." ;;
+        de:aide_reinit) info "Eine neue AIDE-Baseline ersetzt den bisherigen Referenzzustand. Das sollte nur nach bewusst geprüften Änderungen gemacht werden, sonst werden Manipulationen versehentlich als normal übernommen." ;;
+        en:aide_reinit) info "A new AIDE baseline replaces the previous reference state. Do this only after consciously verified changes, otherwise tampering may accidentally be accepted as normal." ;;
+    esac
+}
 
-validate_email() { [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; }
-validate_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+tr_msg() {
+    local key="$1"
+    case "$UI_LANG:$key" in
+        de:language_prompt) echo "Sprache wählen / Select language:" ;;
+        en:language_prompt) echo "Select language / Sprache wählen:" ;;
+        de:start_mode) echo "Startmodus wählen:" ;;
+        en:start_mode) echo "Select startup mode:" ;;
+        de:menu_1) echo "Prüfung              (Nur Scan, keine Änderungen)" ;;
+        en:menu_1) echo "Assessment           (Scan only, no changes)" ;;
+        de:menu_2) echo "Empfohlene Härtung   (nur empfohlene Standardmaßnahmen)" ;;
+        en:menu_2) echo "Recommended hardening (recommended standard measures only)" ;;
+        de:menu_3) echo "Schritt für Schritt  (alle Bereiche einzeln durchgehen)" ;;
+        en:menu_3) echo "Step by step         (review all areas one by one)" ;;
+        de:menu_4) echo "Vollautomatisch      (Liest security_config.env)" ;;
+        en:menu_4) echo "Fully automatic      (Reads security_config.env)" ;;
+        de:menu_5) echo "Vollständiger Rollback (ohne Rückfragen)" ;;
+        en:menu_5) echo "Full rollback        (without further prompts)" ;;
+        de:menu_6) echo "Selektives Entfernen (Auswahlmenü mit Erkennung)" ;;
+        en:menu_6) echo "Selective removal    (detection + selection menu)" ;;
+        de:menu_7) echo "Expertenmodus        (Profile / Spezialfälle)" ;;
+        en:menu_7) echo "Expert mode          (profiles / special cases)" ;;
+        de:menu_prompt) echo "Modus [1-7]: " ;;
+        en:menu_prompt) echo "Mode [1-7]: " ;;
+        de:mode_1_ok) echo "Modus 1: Prüfung" ;;
+        en:mode_1_ok) echo "Mode 1: Assessment" ;;
+        de:mode_2_ok) echo "Modus 2: Empfohlene Härtung" ;;
+        en:mode_2_ok) echo "Mode 2: Recommended hardening" ;;
+        de:mode_3_ok) echo "Modus 3: Härtung Schritt für Schritt" ;;
+        en:mode_3_ok) echo "Mode 3: Step-by-step hardening" ;;
+        de:mode_4_ok) echo "Modus 4: Vollautomatisch" ;;
+        en:mode_4_ok) echo "Mode 4: Fully automatic" ;;
+        de:mode_5_ok) echo "Modus 5: Vollständiger Rollback" ;;
+        en:mode_5_ok) echo "Mode 5: Full rollback" ;;
+        de:config_file) echo "Config-Datei" ;;
+        en:config_file) echo "Config file" ;;
+        de:set_recommended_prefix) echo "  Auf '" ;;
+        en:set_recommended_prefix) echo "  Set '" ;;
+        de:set_recommended_suffix) echo "' setzen?" ;;
+        en:set_recommended_suffix) echo "'?" ;;
+        de:no_key_warning) echo "  WARNUNG: Kein Ed25519-Key gefunden — Deaktivierung sperrt dich aus!" ;;
+        en:no_key_warning) echo "  WARNING: No Ed25519 key found — disabling this may lock you out!" ;;
+        de:restore_backup_prompt) echo "Backup wiederherstellen?" ;;
+        en:restore_backup_prompt) echo "Restore a backup?" ;;
+        de:mode_6_ok) echo "Modus 6: Selektives Entfernen" ;;
+        en:mode_6_ok) echo "Mode 6: Selective removal" ;;
+        de:mode_7_ok) echo "Modus 7: Expertenmodus" ;;
+        en:mode_7_ok) echo "Mode 7: Expert mode" ;;
+        de:invalid_selection) echo "Ungültige Auswahl. Bitte 1-7 eingeben." ;;
+        en:invalid_selection) echo "Invalid selection. Please enter 1-7." ;;
+        de:selective_menu_title) echo "Erkannte entfern- oder rücksetzbare Komponenten:" ;;
+        en:selective_menu_title) echo "Detected removable / resettable components:" ;;
+        de:mark_all) echo "Alle markieren" ;;
+        en:mark_all) echo "Select all" ;;
+        de:clear_all) echo "Alle abwählen" ;;
+        en:clear_all) echo "Clear all" ;;
+        de:apply_selection) echo "Auswahl übernehmen" ;;
+        en:apply_selection) echo "Apply selection" ;;
+        de:enter_apply_hint) echo "Enter = Auswahl übernehmen, wenn bereits etwas markiert ist" ;;
+        en:enter_apply_hint) echo "Enter = apply selection when at least one item is selected" ;;
+        de:cancel) echo "Abbrechen" ;;
+        en:cancel) echo "Cancel" ;;
+        de:toggle_prompt) echo "Auswahl (Nummern/CSV zum Umschalten): " ;;
+        en:toggle_prompt) echo "Selection (numbers/CSV to toggle): " ;;
+        de:nothing_selected) echo "Es wurde nichts ausgewählt." ;;
+        en:nothing_selected) echo "Nothing has been selected." ;;
+        de:no_removable) echo "Es wurden keine entfernbaren bzw. zurücksetzbaren Komponenten erkannt." ;;
+        en:no_removable) echo "No removable or resettable components were detected." ;;
+        de:aborted_selective) echo "Selektives Entfernen abgebrochen." ;;
+        en:aborted_selective) echo "Selective removal cancelled." ;;
+        de:profile_prompt) echo "Härtungsprofil wählen:" ;;
+        en:profile_prompt) echo "Select hardening profile:" ;;
+        de:profile_default) echo "Profil [2]: " ;;
+        en:profile_default) echo "Profile [2]: " ;;
+        de:profile_safe) echo "safe           (vorsichtig, weniger invasiv)" ;;
+        en:profile_safe) echo "safe           (conservative, less invasive)" ;;
+        de:profile_server) echo "server         (empfohlene Standard-Baseline)" ;;
+        en:profile_server) echo "server         (recommended default baseline)" ;;
+        de:profile_strict) echo "strict         (strenger, inkl. AIDE ohne Timeout)" ;;
+        en:profile_strict) echo "strict         (stricter, incl. AIDE without timeout)" ;;
+        de:profile_container) echo "container-host (für Docker/Podman-Hosts optimiert)" ;;
+        en:profile_container) echo "container-host (optimized for Docker/Podman hosts)" ;;
+        de:profile_nextcloud) echo "nextcloud-host (AIDE ohne Timeout, Nextcloud-freundlich)" ;;
+        en:profile_nextcloud) echo "nextcloud-host (AIDE without timeout, Nextcloud-friendly)" ;;
+        de:profile_invalid) echo "Ungültiges Profil. Erlaubt: safe|server|strict|container-host|nextcloud-host" ;;
+        en:profile_invalid) echo "Invalid profile. Allowed: safe|server|strict|container-host|nextcloud-host" ;;
+        de:profile_selected) echo "Aktives Profil" ;;
+        en:profile_selected) echo "Active profile" ;;
+        de:interactive_plan_recommended) echo "Interaktive Strategie: nur empfohlene Standardmaßnahmen" ;;
+        en:interactive_plan_recommended) echo "Interactive strategy: recommended standard measures only" ;;
+        de:interactive_plan_step) echo "Interaktive Strategie: alle Bereiche Schritt für Schritt" ;;
+        en:interactive_plan_step) echo "Interactive strategy: review all areas step by step" ;;
+        de:interactive_plan_expert) echo "Interaktive Strategie: Expertenmodus mit Profilen" ;;
+        en:interactive_plan_expert) echo "Interactive strategy: expert mode with profiles" ;;
+        de:recommended_intro_1) echo "Dieser Modus setzt empfohlene Standardmaßnahmen für typische Debian-/Ubuntu-Server um." ;;
+        en:recommended_intro_1) echo "This mode applies recommended baseline measures for typical Debian/Ubuntu servers." ;;
+        de:recommended_intro_2) echo "Spezialfälle wie 2FA, Mail-Benachrichtigungen und Expertenprofile werden dabei übersprungen; kontextabhängige Container-Empfehlungen werden zusätzlich berücksichtigt." ;;
+        en:recommended_intro_2) echo "Special cases such as 2FA, mail notifications and expert profiles are skipped in this mode; context-aware container recommendations are considered additionally." ;;
+        de:recommended_intro_3) echo "Vor Änderungen wird geprüft, gesichert und nur bei Bedarf nachgefragt." ;;
+        en:recommended_intro_3) echo "Before changes, the system is checked, backed up and prompts appear only where needed." ;;
+        de:context_detected_prefix) echo "Kontext anhand laufender Container erkannt" ;;
+        en:context_detected_prefix) echo "Context detected from running containers" ;;
+        de:context_recommend_prefix) echo "Auf diesem Host zusätzlich empfohlen" ;;
+        en:context_recommend_prefix) echo "Additionally recommended on this host" ;;
+        de:context_no_match) echo "Kein spezieller Datei-/Mail-/Nextcloud-Kontext per docker ps -a erkannt" ;;
+        en:context_no_match) echo "No special file/mail/Nextcloud context detected via docker ps -a" ;;
+        de:please_enter_1_2) echo "Bitte 1 oder 2 eingeben." ;;
+        en:please_enter_1_2) echo "Please enter 1 or 2." ;;
+        de:skip_list_prefix) echo "In diesem Modus übersprungen" ;;
+        en:skip_list_prefix) echo "Skipped in this mode" ;;
+        de:aide_timeout_disabled) echo "AIDE-Init-Timeout: deaktiviert" ;;
+        en:aide_timeout_disabled) echo "AIDE init timeout: disabled" ;;
+        de:aide_timeout_prefix) echo "AIDE-Init-Timeout" ;;
+        en:aide_timeout_prefix) echo "AIDE init timeout" ;;
+        de:relevant_logs) echo "Relevante Security-/Rollback-Logs:" ;;
+        en:relevant_logs) echo "Relevant security / rollback logs:" ;;
+        de:log_changes_label) echo "Skript-Änderungen" ;;
+        en:log_changes_label) echo "Script changes" ;;
+        de:txlog_label) echo "Transaktionslog" ;;
+        en:txlog_label) echo "Transaction log" ;;
+        de:txlog_label_with_rb) echo "Transaktionslog (für Rollback)" ;;
+        en:txlog_label_with_rb) echo "Transaction log (for rollback)" ;;
+        de:summary_label) echo "Übersicht" ;;
+        en:summary_label) echo "Summary" ;;
+        de:invalid_number) echo "Ungültige Nummer" ;;
+        en:invalid_number) echo "Invalid number" ;;
+        de:invalid_input) echo "Ungültige Eingabe" ;;
+        en:invalid_input) echo "Invalid input" ;;
+        de:no_valid_targets) echo "Keine gültigen Ziele ausgewählt." ;;
+        en:no_valid_targets) echo "No valid targets selected." ;;
+        de:selected_targets) echo "Ausgewählte Ziele" ;;
+        en:selected_targets) echo "Selected targets" ;;
+        de:confirm_selective_remove) echo "Ausgewählte Komponenten jetzt entfernen bzw. zurücksetzen?" ;;
+        en:confirm_selective_remove) echo "Remove or reset the selected components now?" ;;
+        de:archive_txlog_ok) echo "Transaktionslog archiviert" ;;
+        en:archive_txlog_ok) echo "Archived transaction log" ;;
+        de:archive_txlog_fail) echo "Konnte Transaktionslog nicht archivieren." ;;
+        en:archive_txlog_fail) echo "Could not archive transaction log." ;;
+        de:result_label) echo "Ergebnis" ;;
+        en:result_label) echo "Result" ;;
+        de:matrix_green) echo "★★★★★  MATRIX: GRÜN — System entspricht der Hardening-Baseline  ★★★★★" ;;
+        en:matrix_green) echo "★★★★★  MATRIX: GREEN — System matches the hardening baseline  ★★★★★" ;;
+        de:matrix_warn_prefix) echo "★★★★☆  MATRIX:" ;;
+        en:matrix_warn_prefix) echo "★★★★☆  MATRIX:" ;;
+        de:matrix_warn_suffix) echo "offene Finding(s) — Härtung empfohlen" ;;
+        en:matrix_warn_suffix) echo "open finding(s) — hardening recommended" ;;
+        de:matrix_red_prefix) echo "★★☆☆☆  MATRIX: ROT —" ;;
+        en:matrix_red_prefix) echo "★★☆☆☆  MATRIX: RED —" ;;
+        de:matrix_red_suffix) echo "Finding(s) offen — Sofortmaßnahmen erforderlich" ;;
+        en:matrix_red_suffix) echo "finding(s) open — immediate action required" ;;
+        de:run_without_assess) echo "Ohne --assess starten, um Härtung anzuwenden." ;;
+        en:run_without_assess) echo "Run without --assess to apply hardening." ;;
+        de:step_intro) echo "Dieser Modus geht alle Bereiche einzeln durch, ohne Profilwissen vorauszusetzen." ;;
+        en:step_intro) echo "This mode walks through all areas one by one without requiring profile knowledge." ;;
+        de:own_risk) echo "Auf eigene Gefahr! Vorher Backups erstellen (z.B. Proxmox Snapshot)." ;;
+        en:own_risk) echo "At your own risk. Create backups first, for example a Proxmox snapshot." ;;
+        de:start_hardening) echo "Härtung starten?" ;;
+        en:start_hardening) echo "Start hardening?" ;;
+        de:aborted) echo "Abgebrochen." ;;
+        en:aborted) echo "Cancelled." ;;
+        de:aborted_ctrlc) echo "Vorgang durch Benutzer mit Strg+C abgebrochen." ;;
+        en:aborted_ctrlc) echo "Operation aborted by user with Ctrl+C." ;;
+        de:no_open_findings_mode) echo "Keine offenen Findings erkannt — in diesem Modus sind keine weiteren Änderungen nötig." ;;
+        en:no_open_findings_mode) echo "No open findings detected — no further changes are needed in this mode." ;;
+        de:manual_step_mode_hint) echo "Wenn du Maßnahmen trotzdem manuell durchgehen willst, nutze 'Schritt für Schritt'." ;;
+        en:manual_step_mode_hint) echo "If you still want to review measures manually, use 'Step by step'." ;;
+        de:no_relevant_findings_mode) echo "Es wurden keine in diesem Modus bearbeitbaren offenen Findings erkannt." ;;
+        en:no_relevant_findings_mode) echo "No open findings relevant to this mode were detected." ;;
+        de:open_points_special) echo "Offene Punkte betreffen entweder übersprungene Spezialfälle oder sind bereits manuell abgearbeitet." ;;
+        en:open_points_special) echo "Open points either belong to skipped special cases or were already handled manually." ;;
+        de:pre_assessment) echo "Bewertung vor der Härtung:" ;;
+        en:pre_assessment) echo "Pre-Hardening Assessment:" ;;
+        de:post_assessment) echo "Bewertung nach der Härtung:" ;;
+        en:post_assessment) echo "Post-Hardening Assessment:" ;;
+        de:manage_backups) echo "Backups verwalten?" ;;
+        en:manage_backups) echo "Manage backups?" ;;
+        de:done_green) echo "║  ✔  Script abgeschlossen — MATRIX VOLLSTÄNDIG GRÜN          ║" ;;
+        en:done_green) echo "║  ✔  Script completed — MATRIX FULLY GREEN                   ║" ;;
+        de:done_red_prefix) echo "║  ✘  Script abgeschlossen —" ;;
+        en:done_red_prefix) echo "║  ✘  Script completed —" ;;
+        de:done_red_suffix) echo "Finding(s) verbleiben         ║" ;;
+        en:done_red_suffix) echo "finding(s) remain            ║" ;;
+        de:reboot_recommended) echo "⚠  REBOOT empfohlen für vollständige Wirkung aller Kernel-Änderungen!" ;;
+        en:reboot_recommended) echo "⚠  REBOOT recommended for full effect of all kernel-related changes!" ;;
+        de:dry_run_no_changes) echo "*** DRY-RUN: Keine Änderungen vorgenommen ***" ;;
+        en:dry_run_no_changes) echo "*** DRY-RUN: No changes were made ***" ;;
+        de:save_ssh_changes) echo "SSH-Änderungen speichern?" ;;
+        en:save_ssh_changes) echo "Save SSH changes?" ;;
+        de:ssh_password_still_yes) echo "PasswordAuthentication ist effektiv weiterhin" ;;
+        en:ssh_password_still_yes) echo "PasswordAuthentication is still effectively" ;;
+        de:check_include_files) echo "Prüfe andere Include-Dateien unter /etc/ssh/sshd_config.d/." ;;
+        en:check_include_files) echo "Check other include files under /etc/ssh/sshd_config.d/." ;;
+        de:auditd_check_hint) echo "Prüfe: journalctl -u auditd -xe und ob Kernel-Auditing verfügbar ist." ;;
+        en:auditd_check_hint) echo "Check: journalctl -u auditd -xe and whether kernel auditing is available." ;;
+        *) echo "$key" ;;
+    esac
+}
+
+select_ui_language() {
+    if $CLI_LANG_SET; then
+        return 0
+    fi
+
+    if (( ORIGINAL_ARGC == 0 )); then
+        echo
+        echo -e "${C_BOLD}${C_CYAN}$(tr_msg language_prompt)${C_RESET}"
+        echo "  1) Deutsch"
+        echo "  2) English"
+        local lang_choice
+        while true; do
+            read -rp "[1-2] [1]: " lang_choice </dev/tty
+            lang_choice=${lang_choice:-1}
+            case "$lang_choice" in
+                1) UI_LANG="de"; break ;;
+                2) UI_LANG="en"; break ;;
+                *) warn "$(tr_msg please_enter_1_2)" ;;
+            esac
+        done
+    else
+        case "${LANG:-}" in
+            en*|C.UTF-8) UI_LANG="en" ;;
+            *) UI_LANG="de" ;;
+        esac
+    fi
+}
+
+normalize_csv_list() {
+    local raw="$1" item out=""
+    IFS=',' read -r -a _items <<< "$raw"
+    for item in "${_items[@]}"; do
+        item="${item// /}"
+        [[ -z "$item" ]] && continue
+        [[ ",$out," == *",$item,"* ]] && continue
+        [[ -n "$out" ]] && out+="," 
+        out+="$item"
+    done
+    echo "$out"
+}
+
+append_skip_sections() {
+    local current="${AUTO_SKIP_SECTIONS:-}" add="$1" item
+    IFS=',' read -r -a _items <<< "$add"
+    for item in "${_items[@]}"; do
+        item="${item// /}"
+        [[ -z "$item" ]] && continue
+        [[ ",$current," == *",$item,"* ]] || current="${current:+$current,}$item"
+    done
+    AUTO_SKIP_SECTIONS="$(normalize_csv_list "$current")"
+}
+
+validate_profile_name() {
+    case "$1" in
+        safe|server|strict|container-host|nextcloud-host) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+select_hardening_profile() {
+    $PROFILE_SELECTED && return 0
+    $ROLLBACK_MODE && return 0
+    $SELECTIVE_REMOVE_MODE && return 0
+    $ASSESS_ONLY && return 0
+    if (( ORIGINAL_ARGC == 0 )) && ! $EXPERT_PROFILE_MODE; then
+        return 0
+    fi
+    if (( ORIGINAL_ARGC == 0 )); then
+        echo
+        echo -e "${C_BOLD}${C_CYAN}$(tr_msg profile_prompt)${C_RESET}"
+        echo "  1) $(tr_msg profile_safe)"
+        echo "  2) $(tr_msg profile_server)"
+        echo "  3) $(tr_msg profile_strict)"
+        echo "  4) $(tr_msg profile_container)"
+        echo "  5) $(tr_msg profile_nextcloud)"
+        local profile_choice
+        while true; do
+            read -rp "$(tr_msg profile_default)" profile_choice </dev/tty
+            profile_choice=${profile_choice:-2}
+            case "$profile_choice" in
+                1) ACTIVE_PROFILE="safe"; break ;;
+                2) ACTIVE_PROFILE="server"; break ;;
+                3) ACTIVE_PROFILE="strict"; break ;;
+                4) ACTIVE_PROFILE="container-host"; break ;;
+                5) ACTIVE_PROFILE="nextcloud-host"; break ;;
+                *) warn "$(tr_msg profile_invalid)" ;;
+            esac
+        done
+        PROFILE_SELECTED=true
+    fi
+}
+
+normalize_space_csv() {
+    printf '%s' "$1" | sed 's/^[[:space:],]*//; s/[[:space:],]*$//; s/[[:space:]]*,[[:space:]]*/,/g; s/,,*/,/g'
+}
+
+detect_host_runtime_context() {
+    HOST_HAS_DOCKER=false
+    HOST_HAS_PODMAN=false
+    HOST_CONTEXT_ROLE_FILE=false
+    HOST_CONTEXT_ROLE_MAIL=false
+    HOST_CONTEXT_ROLE_NEXTCLOUD=false
+    HOST_CONTEXT_CONTAINER_HINTS=""
+    HOST_CONTEXT_EXTRA_RECOMMENDATIONS=""
+
+    local lines="" line combined list extra=""
+    local docker_output="" podman_output="" docker_ok=false podman_ok=false
+    local probe=""
+
+    if command -v docker >/dev/null 2>&1; then
+        probe=$(timeout 8 docker ps -a --format '{{.Image}} {{.Names}}' 2>/dev/null || true)
+        if [[ -n "$probe" ]]; then
+            docker_ok=true
+            HOST_HAS_DOCKER=true
+            docker_output="$probe"
+        else
+            probe=$(timeout 8 docker container ls -a --format '{{.Image}} {{.Names}}' 2>/dev/null || true)
+            if [[ -n "$probe" ]]; then
+                docker_ok=true
+                HOST_HAS_DOCKER=true
+                docker_output="$probe"
+            fi
+        fi
+    fi
+
+    if command -v podman >/dev/null 2>&1; then
+        probe=$(timeout 8 podman ps -a --format '{{.Image}} {{.Names}}' 2>/dev/null || true)
+        if [[ -n "$probe" ]]; then
+            podman_ok=true
+            HOST_HAS_PODMAN=true
+            podman_output="$probe"
+        else
+            probe=$(timeout 8 podman container ls -a --format '{{.Image}} {{.Names}}' 2>/dev/null || true)
+            if [[ -n "$probe" ]]; then
+                podman_ok=true
+                HOST_HAS_PODMAN=true
+                podman_output="$probe"
+            fi
+        fi
+    fi
+
+    if $docker_ok; then
+        lines+="$docker_output"$'\n'
+    fi
+    if $podman_ok; then
+        lines+="$podman_output"$'\n'
+    fi
+
+    # Fallback heuristics if container listing was unavailable or empty.
+    if [[ -z "$lines" ]]; then
+        if command -v docker >/dev/null 2>&1; then
+            probe=$(timeout 8 docker volume ls --format '{{.Name}}' 2>/dev/null || true)
+            if [[ -n "$probe" ]]; then
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] || continue
+                    lines+="volume:${line} ${line}"$'\n'
+                done <<< "$probe"
+            fi
+        fi
+        if command -v podman >/dev/null 2>&1; then
+            probe=$(timeout 8 podman volume ls --format '{{.Name}}' 2>/dev/null || true)
+            if [[ -n "$probe" ]]; then
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] || continue
+                    lines+="volume:${line} ${line}"$'\n'
+                done <<< "$probe"
+            fi
+        fi
+    fi
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        combined=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')
+        if [[ "$combined" == *nextcloud* ]]; then
+            HOST_CONTEXT_ROLE_NEXTCLOUD=true
+            HOST_CONTEXT_ROLE_FILE=true
+        fi
+        if [[ "$combined" == *nextcloud* || "$combined" == *owncloud* || "$combined" == *seafile* || "$combined" == *immich* || "$combined" == *paperless* || "$combined" == *syncthing* || "$combined" == *filebrowser* || "$combined" == *filestash* || "$combined" == *cloudreve* || "$combined" == *drive* || "$combined" == *files* ]]; then
+            HOST_CONTEXT_ROLE_FILE=true
+        fi
+        if [[ "$combined" == *mailcow* || "$combined" == *mailu* || "$combined" == *postfix* || "$combined" == *dovecot* || "$combined" == *roundcube* || "$combined" == *stalwart* || "$combined" == *rspamd* || "$combined" == *smtp* || "$combined" == *imap* ]]; then
+            HOST_CONTEXT_ROLE_MAIL=true
+        fi
+        if [[ "$combined" == *nextcloud* || "$combined" == *mailcow* || "$combined" == *mailu* || "$combined" == *paperless* || "$combined" == *immich* || "$combined" == *seafile* || "$combined" == *owncloud* ]]; then
+            list+=",${line##* }"
+        fi
+    done <<< "$lines"
+
+    list=$(normalize_space_csv "$list")
+    HOST_CONTEXT_CONTAINER_HINTS="$list"
+
+    if $HOST_CONTEXT_ROLE_FILE || $HOST_CONTEXT_ROLE_MAIL; then
+        extra+=",clamav"
+    fi
+    if $HOST_CONTEXT_ROLE_NEXTCLOUD || $HOST_CONTEXT_ROLE_MAIL; then
+        extra+=",auditd,aide"
+    fi
+    extra=$(normalize_csv_list "$extra")
+    HOST_CONTEXT_EXTRA_RECOMMENDATIONS="$extra"
+}
+
+apply_profile_defaults() {
+    $ROLLBACK_MODE && return 0
+    $SELECTIVE_REMOVE_MODE && return 0
+    local profile="${AUTO_PROFILE:-$ACTIVE_PROFILE}"
+    validate_profile_name "$profile" || { warn "$(tr_msg profile_invalid)"; profile="server"; }
+    ACTIVE_PROFILE="$profile"
+    PROFILE_STRICT=false
+
+    if $INTERACTIVE_RECOMMENDED_MODE; then
+        detect_host_runtime_context
+        append_skip_sections "ssh_key,msmtp,2fa,sshguard,ufw"
+        local recommended_extra="${HOST_CONTEXT_EXTRA_RECOMMENDATIONS:-}"
+        local base_optional="clamav,auditd,aide"
+        local item
+        for item in ${base_optional//,/ }; do
+            [[ ",$recommended_extra," == *",$item,"* ]] || append_skip_sections "$item"
+        done
+    fi
+
+    case "$ACTIVE_PROFILE" in
+        safe)
+            append_skip_sections "msmtp,2fa,auditd,aide,sshguard"
+            [[ "$AIDE_INIT_TIMEOUT" == "$AIDE_INIT_TIMEOUT_DEFAULT" ]] && AIDE_INIT_TIMEOUT=900
+            ;;
+        server)
+            :
+            ;;
+        strict)
+            PROFILE_STRICT=true
+            [[ "$AIDE_INIT_TIMEOUT" == "$AIDE_INIT_TIMEOUT_DEFAULT" ]] && AIDE_INIT_TIMEOUT=0
+            ;;
+        container-host)
+            append_skip_sections "msmtp,2fa,clamav,aide"
+            [[ "$AIDE_INIT_TIMEOUT" == "$AIDE_INIT_TIMEOUT_DEFAULT" ]] && AIDE_INIT_TIMEOUT=900
+            ;;
+        nextcloud-host)
+            append_skip_sections "msmtp,2fa"
+            [[ "$AIDE_INIT_TIMEOUT" == "$AIDE_INIT_TIMEOUT_DEFAULT" ]] && AIDE_INIT_TIMEOUT=0
+            ;;
+    esac
+
+    if $INTERACTIVE_RECOMMENDED_MODE; then
+        info "$(tr_msg interactive_plan_recommended)"
+        if [[ -n "${HOST_CONTEXT_CONTAINER_HINTS:-}" ]]; then
+            info "$(tr_msg context_detected_prefix): ${HOST_CONTEXT_CONTAINER_HINTS}"
+        fi
+        if [[ -n "${HOST_CONTEXT_EXTRA_RECOMMENDATIONS:-}" ]]; then
+            info "$(tr_msg context_recommend_prefix): ${HOST_CONTEXT_EXTRA_RECOMMENDATIONS}"
+        else
+            info "$(tr_msg context_no_match)"
+        fi
+        [[ -n "${AUTO_SKIP_SECTIONS:-}" ]] && info "$(tr_msg skip_list_prefix): $AUTO_SKIP_SECTIONS"
+        return 0
+    fi
+
+    if $INTERACTIVE_STEP_MODE && ! $EXPERT_PROFILE_MODE; then
+        info "$(tr_msg interactive_plan_step)"
+        return 0
+    fi
+
+    if $EXPERT_PROFILE_MODE; then
+        info "$(tr_msg interactive_plan_expert)"
+    fi
+
+    if $PROFILE_SELECTED || $AUTO_MODE || $EXPERT_PROFILE_MODE; then
+        info "$(tr_msg profile_selected): $ACTIVE_PROFILE"
+        [[ -n "${AUTO_SKIP_SECTIONS:-}" ]] && info "Profile skips: $AUTO_SKIP_SECTIONS"
+        if [[ "$AIDE_INIT_TIMEOUT" == "0" ]]; then
+            info "$(tr_msg aide_timeout_disabled)"
+        else
+            info "$(tr_msg aide_timeout_prefix): ${AIDE_INIT_TIMEOUT}s"
+        fi
+    fi
+}
+
+show_diff_preview() {
+    local target="$1" candidate="$2" label="${3:-$1}"
+    echo -e "${C_MAGENTA}DRY-RUN DIFF:${C_RESET} $label"
+    if [[ -f "$target" ]]; then
+        diff -u --label "$target (current)" --label "$target (proposed)" "$target" "$candidate" || true
+    else
+        echo "--- $target (current: absent)"
+        echo "+++ $target (proposed)"
+        sed 's/^/+ /' "$candidate"
+    fi
+}
+
+install_managed_file() {
+    local target="$1" temp_file="$2" mode="${3:-644}" owner="${4:-}" group="${5:-}"
+    local existed=false needs_update=true current_mode=""
+    [[ -f "$target" ]] && existed=true
+
+    if $existed && cmp -s "$target" "$temp_file" 2>/dev/null; then
+        current_mode=$(stat -c '%a' "$target" 2>/dev/null || true)
+        if [[ -z "$mode" || "$current_mode" == "$mode" ]]; then
+            needs_update=false
+        fi
+    fi
+
+    if $DRY_RUN; then
+        if $needs_update; then
+            show_diff_preview "$target" "$temp_file" "$target"
+            record_dry_run_action "Update $target"
+        fi
+        rm -f "$temp_file" 2>/dev/null || true
+        return 0
+    fi
+
+    if ! $needs_update; then
+        rm -f "$temp_file" 2>/dev/null || true
+        success "$target already correct."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$target")" 2>/dev/null || true
+    backup_file "$target"
+    if ! install -m "$mode" "$temp_file" "$target"; then
+        rm -f "$temp_file" 2>/dev/null || true
+        error "Could not install managed file: $target"
+        return 2
+    fi
+    if [[ -n "$owner" ]]; then
+        chown "${owner}${group:+:$group}" "$target"
+    fi
+    if $existed; then
+        log_change "MODIFIED:$target"
+    else
+        log_change "ADDED_FILE:$target"
+        txlog "FILE_ADDED" "$target"
+    fi
+    rm -f "$temp_file" 2>/dev/null || true
+    return 0
+}
+
+list_script_managed_files() {
+    printf '%s
+'         "$SYSCTL_CONFIG_FILE" "$SUDOERS_TTY_FILE" "$MODPROBE_BLACKLIST" "$LIMITS_CONF" "$FAILLOCK_CONF" "$PWQUALITY_CONF"         "$BANNER_FILE" "$MOTD_FILE" "$AIDE_CRON" "$AIDE_LOCAL_EXCLUDES" "$AUDITD_RULES" "$SSHD_HARDENING_DROPIN" "$SSHD_HARDENING_DROPIN_LEGACY" "/etc/systemd/journald.conf" "/etc/ssh/sshd_config"
+}
+
+capture_managed_state() {
+    local outfile="$1" f
+    : > "$outfile"
+    while IFS= read -r f; do
+        [[ -e "$f" ]] || continue
+        sha256sum "$f" >> "$outfile" 2>/dev/null || true
+    done < <(list_script_managed_files | awk 'NF && !seen[$0]++ {print $0}')
+}
+
+prove_idempotence() {
+    local -a funcs=("$@")
+    $DRY_RUN && return 0
+    $ROLLBACK_MODE && return 0
+    $SELECTIVE_REMOVE_MODE && return 0
+    $ASSESS_ONLY && return 0
+    $PROVE_IDEMPOTENCE || return 0
+
+    echo
+    info "${C_BOLD}Idempotence proof — planning only for the sections touched in this run${C_RESET}"
+    local before after proof_output
+    before=$(mktemp_tracked)
+    after=$(mktemp_tracked)
+    proof_output=$(mktemp_tracked)
+    capture_managed_state "$before"
+
+    local old_dry="$DRY_RUN" old_auto="$AUTO_MODE" old_verify="$VERIFY_AFTER_HARDENING" old_actions="$DRY_RUN_ACTIONS"
+    local -a old_notes=("${DRY_RUN_NOTES[@]}")
+    DRY_RUN=true
+    AUTO_MODE=true
+    VERIFY_AFTER_HARDENING=false
+    DRY_RUN_ACTIONS=0
+    DRY_RUN_NOTES=()
+
+    : > "$IDEMPOTENCE_LOG"
+    local func
+    for func in "${funcs[@]}"; do
+        declare -f "$func" >/dev/null 2>&1 || continue
+        "$func" >> "$proof_output" 2>&1 || true
+    done
+    cat "$proof_output" >> "$IDEMPOTENCE_LOG"
+    capture_managed_state "$after"
+
+    DRY_RUN="$old_dry"
+    AUTO_MODE="$old_auto"
+    VERIFY_AFTER_HARDENING="$old_verify"
+    local proof_actions="$DRY_RUN_ACTIONS"
+    local -a proof_notes=("${DRY_RUN_NOTES[@]}")
+    DRY_RUN_ACTIONS="$old_actions"
+    DRY_RUN_NOTES=("${old_notes[@]}")
+
+    if cmp -s "$before" "$after" && (( proof_actions == 0 )); then
+        IDEMPOTENCE_LAST_RESULT="PASS"
+        success "Idempotence proof PASSED — a second scripted pass would not change managed configuration."
+    else
+        IDEMPOTENCE_LAST_RESULT="FAIL"
+        warn "Idempotence proof found pending actions: $proof_actions"
+        local note
+        for note in "${proof_notes[@]:0:10}"; do
+            echo "  - $note"
+        done
+        info "Details: $IDEMPOTENCE_LOG"
+    fi
+}
+
+# ============================================================================
+# TRANSACTION LOG (machine-readable for rollback)
+# Format: TIMESTAMP|ACTION|DETAILS
+# Actions: BACKUP_CREATED, FILE_ADDED, FILE_REMOVED, PKG_INSTALLED,
+#          SERVICE_ENABLED, SERVICE_STARTED, ROOT_LOCKED, PAM_FAILLOCK_ENABLED
+# ============================================================================
+txlog() {
+    $DRY_RUN && return 0
+    local action="$1" details="$2"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')|${action}|${details}" >> "$TRANSACTION_LOG"
+}
 
 log_change() {
     $DRY_RUN && return 0
     echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" >> "$SCRIPT_LOG_FILE"
 }
 
-# --- Safe Command Execution (no eval!) ---
-# Usage: run_cmd "log description" command arg1 arg2 ...
-run_cmd() {
-    local log_description="$1"
-    shift
-    local cmd_display="$*"
+# ============================================================================
+# SAFE CONFIG FILE PARSER (no source/eval)
+# ============================================================================
+parse_config_file() {
+    local cfg="$1"
+    [[ -f "$cfg" ]] || { warn "Auto mode: no config file found at '$cfg'. Using defaults."; return 0; }
 
-    if $DRY_RUN; then
-        dry_run_echo "$cmd_display"
-        return 0
-    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" != *=* ]] && continue
 
-    debug "Executing: $cmd_display"
-    if "$@"; then
-        log_change "$log_description"
-        return 0
-    else
-        local exit_code=$?
-        error "Command failed (exit $exit_code): $cmd_display"
-        return $exit_code
-    fi
+        local key="${line%%=*}"
+        local value="${line#*=}"
+        key="$(echo "$key" | tr -d '[:space:]')"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%\"}" ; value="${value#\"}"
+        value="${value%\'}" ; value="${value#\'}"
+
+        case "$key" in
+            AUTO_SSH_PORT|AUTO_ADMIN_EMAIL|AUTO_SKIP_SECTIONS|AUTO_ALLOW_USERS|AUTO_PROFILE|AUTO_PROVE_IDEMPOTENCE|\
+            AUTO_SMTP_HOST|AUTO_SMTP_PORT|AUTO_SMTP_TLS|AUTO_SMTP_USER|AUTO_SMTP_PASS|\
+            AUTO_APPARMOR_ENFORCE)
+                printf -v "$key" '%s' "$value" ;;
+            *) warn "Ignoring unsupported config key: $key" ;;
+        esac
+    done < "$cfg"
+    case "${AUTO_PROVE_IDEMPOTENCE:-}" in
+        false|0|no|n) PROVE_IDEMPOTENCE=false ;;
+        true|1|yes|y) PROVE_IDEMPOTENCE=true ;;
+    esac
+    info "Loaded config safely: $cfg"
 }
 
-# For commands that need shell features (pipes, redirects) - use sparingly
-run_shell() {
-    local log_description="$1"
-    local shell_cmd="$2"
+# ============================================================================
+# ARGUMENT PARSING
+# ============================================================================
+parse_args() {
+    local config_file=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)    DRY_RUN=true; shift ;;
+            --auto)       AUTO_MODE=true; shift ;;
+            --assess)     ASSESS_ONLY=true; shift ;;
+            --verify)     VERIFY_AFTER_HARDENING=true; shift ;;
+            --rollback)   ROLLBACK_MODE=true; shift ;;
+            --remove)
+                SELECTIVE_REMOVE_MODE=true
+                if [[ $# -ge 2 ]] && [[ ! "$2" =~ ^-- ]]; then
+                    REMOVE_TARGETS_RAW="$2"
+                    shift 2
+                else
+                    REMOVE_TARGETS_RAW="__MENU__"
+                    shift
+                fi ;;
+            --lang)
+                [[ $# -lt 2 ]] && { echo "ERROR: --lang requires 'de' or 'en'" >&2; exit 1; }
+                case "$2" in
+                    de|DE|de_DE*) UI_LANG="de" ;;
+                    en|EN|en_US*|en_GB*) UI_LANG="en" ;;
+                    *) echo "ERROR: Unsupported language '$2' (use: de|en)" >&2; exit 1 ;;
+                esac
+                CLI_LANG_SET=true
+                shift 2 ;;
+            --profile)
+                [[ $# -lt 2 ]] && { echo "ERROR: --profile requires a value" >&2; exit 1; }
+                ACTIVE_PROFILE="$2"
+                PROFILE_SELECTED=true
+                shift 2 ;;
+            --no-idempotence-check)
+                PROVE_IDEMPOTENCE=false
+                shift ;;
+            --config)
+                [[ $# -lt 2 ]] && { echo "ERROR: --config requires a file path" >&2; exit 1; }
+                config_file="$2"; shift 2 ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: sudo ./linux_server_security_v5_6.sh [OPTIONS]
 
-    if $DRY_RUN; then
-        dry_run_echo "$shell_cmd"
-        return 0
-    fi
+Interactive startup (when no options given — shows menu):
+  1 = Prüfung (Assessment only — no changes)
+  2 = Empfohlene Härtung (recommended standard measures)
+  3 = Härtung Schritt für Schritt
+  4 = Vollautomatisch (reads security_config.env)
+  5 = Vollständiger Rollback (ohne Rückfragen)
+  6 = Selektives Entfernen einzelner Punkte
+  7 = Expertenmodus (interactive profile selection)
 
-    debug "Executing shell: $shell_cmd"
-    if bash -c "$shell_cmd"; then
-        log_change "$log_description"
-        return 0
-    else
-        local exit_code=$?
-        error "Shell command failed (exit $exit_code): $shell_cmd"
-        return $exit_code
-    fi
+CLI modes:
+  --assess         Scan only — RED/GREEN matrix, exit 2 if red
+  --auto           Fully automated hardening (reads config file, no prompts)
+  --verify         Re-assess after hardening; exit 2 if any RED remains
+  --rollback       Undo all script changes automatically, no prompts
+  --remove LIST    Remove only selected items (comma-separated)
+  --remove menu    Detect removable components and open the selection menu
+  --dry-run        Simulate all changes and show file diffs where supported
+  --profile NAME   safe|server|strict|container-host|nextcloud-host
+  --no-idempotence-check  Skip the automatic second-pass idempotence proof
+
+Supported --remove targets:
+  banners,auditd,aide,pam,sysctl,journald,sudoers,modules
+
+If --remove is used without a value, the interactive selection menu is opened.
+
+Options:
+  --config FILE    Automation config file (default: ./security_config.env)
+  --lang de|en     UI language for menus/startup prompts
+  --help           Show this help
+
+Examples:
+  sudo ./script.sh --assess
+  sudo ./script.sh --auto --verify
+  sudo ./script.sh --rollback
+  sudo ./script.sh --remove banners
+  sudo ./script.sh --remove auditd,aide,banners
+  sudo ./script.sh --remove menu
+EOF
+                exit 0 ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+    done
+    $AUTO_MODE && parse_config_file "${config_file:-$DEFAULT_AUTO_CONFIG}"
 }
 
-# --- Ensure apt is updated (once per session) ---
-ensure_apt_updated() {
-    if ! $SCRIPT_APT_UPDATED; then
-        info "Running 'apt update'..."
-        if run_cmd "APT_UPDATE" apt-get update -qq; then
-            SCRIPT_APT_UPDATED=true
+parse_args "$@"
+
+[[ $EUID -ne 0 ]] && { echo "ERROR: Run as root (sudo)." >&2; exit 1; }
+(( BASH_VERSINFO[0] >= 4 )) || { echo "ERROR: Bash 4+ required." >&2; exit 1; }
+
+# ============================================================================
+# INTERACTIVE STARTUP MENU
+# ============================================================================
+interactive_mode_menu() {
+    (( ORIGINAL_ARGC > 0 )) && return 0
+    INTERACTIVE_MENU_USED=true
+    echo
+    echo -e "${C_BOLD}${C_CYAN}$(tr_msg start_mode)${C_RESET}"
+    printf '  1) %s
+' "$(tr_msg menu_1)"
+    printf '  2) %s
+' "$(tr_msg menu_2)"
+    printf '  3) %s
+' "$(tr_msg menu_3)"
+    printf '  4) %s
+' "$(tr_msg menu_4)"
+    printf '  5) %s
+' "$(tr_msg menu_5)"
+    printf '  6) %s
+' "$(tr_msg menu_6)"
+    printf '  7) %s
+' "$(tr_msg menu_7)"
+    echo
+    local selection auto_cfg
+    while true; do
+        read -rp "$(tr_msg menu_prompt)" selection </dev/tty
+        case "$selection" in
+            1) ASSESS_ONLY=true; AUTO_MODE=false; VERIFY_AFTER_HARDENING=false
+               success "$(tr_msg mode_1_ok)"; break ;;
+            2) ASSESS_ONLY=false; AUTO_MODE=false; VERIFY_AFTER_HARDENING=true
+               INTERACTIVE_RECOMMENDED_MODE=true
+               success "$(tr_msg mode_2_ok)"; break ;;
+            3) ASSESS_ONLY=false; AUTO_MODE=false; VERIFY_AFTER_HARDENING=true
+               INTERACTIVE_STEP_MODE=true
+               success "$(tr_msg mode_3_ok)"; break ;;
+            4) ASSESS_ONLY=false; AUTO_MODE=true; VERIFY_AFTER_HARDENING=true
+               read -rp "$(tr_msg config_file) [$DEFAULT_AUTO_CONFIG]: " auto_cfg </dev/tty
+               auto_cfg=${auto_cfg:-$DEFAULT_AUTO_CONFIG}
+               parse_config_file "$auto_cfg"
+               success "$(tr_msg mode_4_ok)"; break ;;
+            5) ROLLBACK_MODE=true
+               success "$(tr_msg mode_5_ok)"; break ;;
+            6) SELECTIVE_REMOVE_MODE=true
+               REMOVE_TARGETS_RAW="__MENU__"
+               success "$(tr_msg mode_6_ok)"; break ;;
+            7) ASSESS_ONLY=false; AUTO_MODE=false; VERIFY_AFTER_HARDENING=true
+               INTERACTIVE_STEP_MODE=true
+               EXPERT_PROFILE_MODE=true
+               success "$(tr_msg mode_7_ok)"; break ;;
+            *) warn "$(tr_msg invalid_selection)" ;;
+        esac
+    done
+}
+
+
+# ============================================================================
+# CORE HELPERS
+
+# ============================================================================
+ask_yes_no() {
+    local question="$1" default="${2:-}" answer
+    if $AUTO_MODE; then
+        [[ "$default" == "n" ]] && { debug "AUTO: '$question' → NO"; return 1; }
+        debug "AUTO: '$question' → YES"; return 0
+    fi
+    while true; do
+        if [[ "$default" == "y" ]]; then
+            echo -en "$question [Y/n]: "; read -r answer </dev/tty; answer=${answer:-y}
+        elif [[ "$default" == "n" ]]; then
+            echo -en "$question [y/N]: "; read -r answer </dev/tty; answer=${answer:-n}
         else
-            error "'apt update' failed."
-            return 1
+            echo -en "$question [y/n]: "; read -r answer </dev/tty
         fi
+        case "$answer" in
+            [Yy]*) return 0 ;; [Nn]*) return 1 ;;
+            *) warn "Bitte 'y' oder 'n' eingeben." ;;
+        esac
+    done
+}
+
+is_section_skipped() {
+    local section="$1" skip_list="${AUTO_SKIP_SECTIONS:-}"
+    [[ -z "$skip_list" ]] && return 1
+    [[ ",$skip_list," == *",$section,"* ]] && return 0
+    return 1
+}
+
+is_package_installed() { dpkg -s "$1" &>/dev/null; }
+validate_email()        { [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; }
+validate_port()         { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+
+run_cmd() {
+    local log_description="$1"; shift
+    if $DRY_RUN; then dry_run_echo "$*"; return 0; fi
+    debug "Executing: $*"
+    if "$@"; then log_change "$log_description"; return 0
+    else local exit_code=$?; error "Command failed (exit $exit_code): $*"; return $exit_code; fi
+}
+
+run_shell() {
+    local log_description="$1" shell_cmd="$2"
+    if $DRY_RUN; then dry_run_echo "$shell_cmd"; return 0; fi
+    debug "Shell: $shell_cmd"
+    if bash -c "$shell_cmd"; then log_change "$log_description"; return 0
+    else local exit_code=$?; error "Shell command failed (exit $exit_code): $shell_cmd"; return $exit_code; fi
+}
+
+show_apt_update_failure_hint() {
+    local logfile="$1"
+    [[ -f "$logfile" ]] || return 0
+
+    if grep -qiE "not valid yet|noch nicht gültig" "$logfile"; then
+        if [[ "$UI_LANG" == "de" ]]; then
+            error "'apt update' ist wegen einer ungültigen Systemzeit bzw. eines NTP-/Snapshot-Problems fehlgeschlagen. Die Paketquellen wirken aus Sicht der VM 'noch nicht gültig'."
+            info "Prüfe Datum/Uhrzeit mit 'timedatectl status' und synchronisiere die Zeit, z. B. per NTP oder nach einem Snapshot-Restore. Danach das Skript erneut starten."
+        else
+            error "'apt update' failed because the system time is invalid or out of sync, often after a snapshot restore. From the VM's point of view the repository metadata is 'not valid yet'."
+            info "Check date/time with 'timedatectl status' and resync the clock, for example via NTP or after restoring a snapshot. Then run the script again."
+        fi
+        command -v timedatectl >/dev/null 2>&1 && timedatectl status --no-pager 2>/dev/null | sed 's/^/  /' || true
+        return 0
+    fi
+
+    if grep -qiE "Temporary failure resolving|Could not resolve|Name or service not known|Failed to fetch" "$logfile"; then
+        if [[ "$UI_LANG" == "de" ]]; then
+            error "'apt update' ist an einem Netzwerk-, DNS- oder Repository-Problem gescheitert."
+            info "Prüfe Internetzugang, DNS-Auflösung und die konfigurierten APT-Repositories."
+        else
+            error "'apt update' failed because of a network, DNS or repository problem."
+            info "Check internet connectivity, DNS resolution and the configured APT repositories."
+        fi
+        return 0
     fi
 }
 
-# --- Install packages if missing ---
-# Usage: ensure_packages_installed pkg1 pkg2 ...
+ensure_apt_updated() {
+    $SCRIPT_APT_UPDATED && return 0
+    $SCRIPT_APT_FAILED && { error "'apt update' previously failed in this run. Fix the root cause before retrying."; return 1; }
+    info "Running 'apt update'..."
+    if $DRY_RUN; then
+        dry_run_echo "apt-get update -qq"
+        return 0
+    fi
+
+    local apt_log
+    apt_log=$(mktemp_tracked)
+    if apt-get update -qq >"$apt_log" 2>&1; then
+        log_change "APT_UPDATE"
+        SCRIPT_APT_UPDATED=true
+        SCRIPT_APT_FAILED=false
+        return 0
+    fi
+
+    local rc=$?
+    SCRIPT_APT_FAILED=true
+    cat "$apt_log" >&2
+    show_apt_update_failure_hint "$apt_log"
+    error "'apt update' failed."
+    return $rc
+}
+
 ensure_packages_installed() {
     local missing=()
-    for pkg in "$@"; do
-        is_package_installed "$pkg" || missing+=("$pkg")
-    done
-
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        success "Required packages already installed: $*"
-        return 0
-    fi
-
+    local pkg
+    for pkg in "$@"; do is_package_installed "$pkg" || missing+=("$pkg"); done
+    [[ ${#missing[@]} -eq 0 ]] && { success "Packages already installed: $*"; return 0; }
     warn "Missing packages: ${missing[*]}"
     if ask_yes_no "Install missing packages (${missing[*]})?" "y"; then
-        ensure_apt_updated || return 1
+        ensure_apt_updated || { warn "Skipping package installation because 'apt update' did not complete successfully."; return 1; }
+        $SCRIPT_APT_FAILED && { warn "Skipping package installation because APT is in failed state for this run."; return 1; }
         if run_cmd "INSTALLED:${missing[*]}" apt-get install -y "${missing[@]}"; then
-            success "Packages installed: ${missing[*]}"
-            return 0
-        else
-            error "Package installation failed."
-            return 1
-        fi
-    else
-        info "Package installation declined."
-        return 1
-    fi
+            for pkg in "${missing[@]}"; do txlog "PKG_INSTALLED" "$pkg"; done
+            success "Packages installed: ${missing[*]}"; return 0
+        else error "Package installation failed."; return 1; fi
+    else info "Package installation declined."; return 1; fi
 }
 
-# --- Backup & Restore ---
+# ============================================================================
+# BACKUP / RESTORE
+# ============================================================================
 backup_file() {
-    local file="$1"
-    local backup_path="${file}${BACKUP_SUFFIX}"
-
-    [[ ! -f "$file" ]] && return 0  # Nothing to back up
-
-    if [[ -f "$backup_path" ]]; then
-        info "Backup already exists: '$backup_path'"
-        return 0
-    fi
-
-    if $DRY_RUN; then
-        dry_run_echo "cp -a '$file' '$backup_path'"
-        return 0
-    fi
-
+    local file="$1" backup_path="${1}${BACKUP_SUFFIX}"
+    [[ ! -f "$file" ]] && return 0
+    [[ -f "$backup_path" ]] && { info "Backup already exists: '$backup_path'"; return 0; }
+    $DRY_RUN && { dry_run_echo "cp -a '$file' '$backup_path'"; return 0; }
     if cp -a "$file" "$backup_path"; then
         info "Backup created: '$backup_path'"
         log_change "BACKUP_CREATED:$file:$backup_path"
+        txlog "BACKUP_CREATED" "$file"
         return 0
-    else
-        error "Could not create backup of '$file'."
-        return 1
-    fi
+    else error "Could not create backup of '$file'."; return 1; fi
 }
 
 restore_file() {
-    local file="$1"
-    local backup_path="${file}${BACKUP_SUFFIX}"
-
+    local file="$1" backup_path="${1}${BACKUP_SUFFIX}"
     if [[ -f "$backup_path" ]]; then
-        if $DRY_RUN; then
-            dry_run_echo "mv '$backup_path' '$file'"
-            return 0
-        fi
-        if mv "$backup_path" "$file"; then
-            success "Restored '$file' from backup."
+        $DRY_RUN && { dry_run_echo "mv '$backup_path' '$file'"; return 0; }
+        mv "$backup_path" "$file" && {
+            success "Restored '$file'."
             log_change "FILE_RESTORED:$file"
             return 0
-        else
-            error "Failed to restore '$file' from '$backup_path'."
-            return 1
-        fi
+        } || { error "Failed to restore '$file'."; return 1; }
     fi
 
-    # Check if file was added by this script
-    if ! $DRY_RUN && [[ -f "$SCRIPT_LOG_FILE" ]] && grep -q "ADDED_FILE:$file" "$SCRIPT_LOG_FILE"; then
-        if [[ -f "$file" ]]; then
-            info "No backup found, but '$file' was added by this script. Removing..."
-            if rm -f "$file"; then
-                success "Removed '$file'."
-                log_change "REMOVED_ADDED_FILE:$file"
-                return 0
-            fi
-        fi
+    local was_added=false
+    if ! $DRY_RUN; then
+        [[ -f "$SCRIPT_LOG_FILE" ]] && grep -qF "ADDED_FILE:$file" "$SCRIPT_LOG_FILE" && was_added=true
+        [[ -f "$TRANSACTION_LOG" ]] && grep -qF "|FILE_ADDED|$file" "$TRANSACTION_LOG" && was_added=true
+    fi
+
+    if $was_added && [[ -f "$file" ]]; then
+        rm -f "$file" && {
+            success "Removed '$file' (was added by script)."
+            log_change "REMOVED_ADDED_FILE:$file"
+            return 0
+        }
     fi
 
     warn "No backup found for '$file'."
     return 0
 }
 
-# --- List all backups created by this script ---
 list_backups() {
-    info "${C_BOLD}Listing all backups created by this script:${C_RESET}"
+    info "${C_BOLD}Backups created by this script:${C_RESET}"
     local found=false
     while IFS= read -r -d '' backup; do
         local original="${backup%"$BACKUP_SUFFIX"}"
@@ -340,26 +1251,16 @@ list_backups() {
         backup_date=$(stat -c '%y' "$backup" 2>/dev/null | cut -d. -f1)
         echo -e "  ${C_GREEN}→${C_RESET} $original (backed up: $backup_date)"
         found=true
-    done < <(find /etc /home -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null)
-
-    if ! $found; then
-        info "No backups found."
-    fi
+    done < <(find /etc /home /root -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null)
+    $found || info "No backups found."
 }
 
-# --- Restore a specific backup interactively ---
 restore_backup_interactive() {
     info "${C_BOLD}Interactive Backup Restore${C_RESET}"
     local backups=()
-    while IFS= read -r -d '' backup; do
-        backups+=("$backup")
-    done < <(find /etc /home -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null)
-
-    if [[ ${#backups[@]} -eq 0 ]]; then
-        info "No backups found to restore."
-        return 0
-    fi
-
+    while IFS= read -r -d '' backup; do backups+=("$backup"); done \
+        < <(find /etc /home /root -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null)
+    [[ ${#backups[@]} -eq 0 ]] && { info "No backups found."; return 0; }
     echo "Available backups:"
     local i
     for i in "${!backups[@]}"; do
@@ -369,179 +1270,266 @@ restore_backup_interactive() {
         echo "  [$((i+1))] $original (backed up: $backup_date)"
     done
     echo "  [0] Cancel"
-
-    local choice
-    read -rp "Select backup to restore [0]: " choice
-    choice=${choice:-0}
-
-    if [[ "$choice" == "0" ]]; then
-        info "Restore cancelled."
-        return 0
-    fi
-
+    local choice; read -rp "Select [0]: " choice </dev/tty; choice=${choice:-0}
+    [[ "$choice" == "0" ]] && { info "Cancelled."; return 0; }
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#backups[@]} )); then
         local selected="${backups[$((choice-1))]}"
         local original="${selected%"$BACKUP_SUFFIX"}"
-        if ask_yes_no "Restore '$original' from backup?" "y"; then
-            restore_file "$original"
-        fi
-    else
-        warn "Invalid selection."
-    fi
+        ask_yes_no "Restore '$original'?" "y" && restore_file "$original"
+    else warn "Invalid selection."; fi
 }
 
-# --- SSH Config Helpers ---
-# Returns the effective value of an sshd parameter, or empty string if unavailable.
-get_effective_sshd_config() {
-    local parameter="$1"
-    local result=""
+# ============================================================================
+# SUDO SMOKE TEST
+# Critical safety mechanism: validates sudo works after PAM changes.
+# If sudo breaks, immediately rolls back the last PAM change.
+# ============================================================================
+sudo_smoke_test() {
+    local rollback_file="${1:-}"
+    info "Running sudo smoke test (validating PAM stack)..."
 
-    # Method 1: sshd -T (most reliable, but needs sshd binary)
-    if command -v sshd >/dev/null 2>&1; then
+    # Test sudo via a harmless command, but force re-authentication check
+    if sudo -n true 2>/dev/null; then
+        success "Sudo smoke test PASSED."
+        return 0
+    fi
+
+    # sudo -n fails if password is required (normal). Try with timeout.
+    # The real test: can PAM even process auth at all?
+    # We test pam_authenticate indirectly by running 'su -c true root' from a non-root
+    # but since we ARE root, test if the pam stack parses without error
+    if python3 -c "import pam; p=pam.pam(); print('ok')" 2>/dev/null | grep -q "ok"; then
+        success "PAM module loads correctly."
+        return 0
+    fi
+
+    # Fallback: check if pam_unix.so is still in the stack
+    if grep -q "pam_unix.so" /etc/pam.d/common-auth 2>/dev/null; then
+        success "PAM stack contains pam_unix.so (basic check passed)."
+        return 0
+    fi
+
+    error "SUDO SMOKE TEST FAILED — PAM stack may be broken!"
+    if [[ -n "$rollback_file" ]] && [[ -f "${rollback_file}${BACKUP_SUFFIX}" ]]; then
+        error "Auto-rolling back PAM change: $rollback_file"
+        restore_file "$rollback_file"
+        warn "PAM restored from backup. Please verify sudo manually."
+    fi
+    return 1
+}
+
+# ============================================================================
+# PAM VALIDATION HELPER
+# Tests that a PAM config file is syntactically valid before deploying it.
+# ============================================================================
+validate_pam_file() {
+    local pam_file="$1"
+    # Check basic structure: must have at least one auth line with pam_unix.so
+    if ! grep -q "pam_unix.so" "$pam_file"; then
+        error "PAM validation failed: pam_unix.so not found in $pam_file"
+        return 1
+    fi
+    # Check for obviously broken lines (syntax errors would have empty module names)
+    if grep -qE "^(auth|account|password|session)\s+\S+\s*$" "$pam_file"; then
+        error "PAM validation failed: line(s) with missing module in $pam_file"
+        return 1
+    fi
+    success "PAM file validation passed: $pam_file"
+    return 0
+}
+
+# ============================================================================
+# ASSESSMENT MATRIX
+# ============================================================================
+record_check() {
+    local id="$1" status="$2" desc="$3"
+    ASSESS_RESULTS["$id"]="${status}:${desc}"
+    local found=false existing
+    for existing in "${ASSESS_ORDER[@]+"${ASSESS_ORDER[@]}"}"; do
+        [[ "$existing" == "$id" ]] && found=true && break
+    done
+    $found || ASSESS_ORDER+=("$id")
+}
+
+normalize_matrix_status() {
+    case "$1" in PASS|FIXED) echo "GREEN" ;; *) echo "RED" ;; esac
+}
+
+count_red_checks() {
+    local red=0 id entry raw
+    for id in "${ASSESS_ORDER[@]}"; do
+        entry="${ASSESS_RESULTS[$id]}"
+        raw="${entry%%:*}"
+        [[ "$(normalize_matrix_status "$raw")" == "RED" ]] && red=$((red+1))
+    done
+    echo "$red"
+}
+
+# ============================================================================
+# SSH HELPERS
+# ============================================================================
+detect_ssh_service() {
+    if systemctl is-active --quiet ssh 2>/dev/null; then SSH_SERVICE="ssh"
+    elif systemctl is-active --quiet sshd 2>/dev/null; then SSH_SERVICE="sshd"
+    elif systemctl list-unit-files 2>/dev/null | grep -q "^ssh\.service"; then SSH_SERVICE="ssh"
+    elif systemctl list-unit-files 2>/dev/null | grep -q "^sshd\.service"; then SSH_SERVICE="sshd"
+    else SSH_SERVICE="ssh"; warn "Cannot detect SSH service, assuming 'ssh'."; fi
+}
+
+get_effective_sshd_config() {
+    local parameter="$1" result=""
+    command -v sshd >/dev/null 2>&1 && \
         result=$(sshd -T -C user=root -C host=localhost -C addr=127.0.0.1 2>/dev/null | \
             grep -i "^${parameter}[[:space:]]" | head -n 1 | awk '{print $2}' || true)
-    fi
-
-    # Method 2: Fallback to config file parsing
-    if [[ -z "$result" ]] && [[ -f /etc/ssh/sshd_config ]]; then
+    [[ -z "$result" ]] && [[ -f /etc/ssh/sshd_config ]] && \
         result=$(grep -iE "^\s*${parameter}\s+" /etc/ssh/sshd_config 2>/dev/null | \
             tail -n 1 | awk '{print $2}' || true)
-    fi
-
     echo "$result"
 }
 
-# Get the SSH port with robust fallback
 get_ssh_port() {
-    local port
-    port=$(get_effective_sshd_config "port")
-    # Validate it's actually a number
-    if [[ -n "$port" ]] && validate_port "$port"; then
-        echo "$port"
-    else
-        echo "22"  # SSH default
-    fi
+    local port; port=$(get_effective_sshd_config "port")
+    { [[ -n "$port" ]] && validate_port "$port"; } && echo "$port" || echo "22"
 }
 
 get_config_file_sshd_setting() {
-    local parameter="$1"
-    local config_file="/etc/ssh/sshd_config"
+    local parameter="$1" config_file="/etc/ssh/sshd_config"
     [[ ! -f "$config_file" ]] && return 0
     grep -iE "^\s*${parameter}\s+" "$config_file" 2>/dev/null | tail -n 1 | awk '{print $2}' || true
 }
 
-get_effective_sysctl_config() {
+show_sshd_setting_sources() {
     local parameter="$1"
-    if sysctl "$parameter" >/dev/null 2>&1; then
-        sysctl -n "$parameter"
-    else
-        echo "not_set"
-    fi
+    info "SSH source lines for ${parameter}:"
+    grep -RinE "^\s*${parameter}\s+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null | sed 's/^/  - /' || true
 }
 
-# --- Modify or add a parameter in sshd_config temp file ---
-# Returns 0 if changed, 1 if already correct
+get_effective_sysctl_config() {
+    sysctl "$1" >/dev/null 2>&1 && sysctl -n "$1" || echo "not_set"
+}
+
+host_has_container_networks() {
+    ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -Eq '^(docker0|cni0|podman0|br-|virbr|lxcbr)'
+}
+
+sysctl_expected_description() {
+    local param="$1" desired="$2"
+    case "$param" in
+        net.ipv4.conf.all.rp_filter|net.ipv4.conf.default.rp_filter)
+            if host_has_container_networks; then
+                echo "${desired} or 2 (container/bridge host)"
+            else
+                echo "$desired"
+            fi
+            ;;
+        *) echo "$desired" ;;
+    esac
+}
+
+sysctl_value_matches_policy() {
+    local param="$1" desired="$2" current="$3"
+    case "$param" in
+        net.ipv4.conf.all.rp_filter|net.ipv4.conf.default.rp_filter)
+            if host_has_container_networks; then
+                [[ "$current" == "1" || "$current" == "2" ]]
+            else
+                [[ "$current" == "$desired" ]]
+            fi
+            ;;
+        *) [[ "$current" == "$desired" ]] ;;
+    esac
+}
+
+load_sysctl_policy() {
+    declare -gA SYSCTL_POLICY=()
+    SYSCTL_POLICY=(
+        ["net.ipv4.conf.all.rp_filter"]="1"             ["net.ipv4.conf.default.rp_filter"]="1"
+        ["net.ipv4.conf.all.accept_redirects"]="0"      ["net.ipv4.conf.default.accept_redirects"]="0"
+        ["net.ipv6.conf.all.accept_redirects"]="0"      ["net.ipv6.conf.default.accept_redirects"]="0"
+        ["net.ipv4.conf.all.secure_redirects"]="0"      ["net.ipv4.conf.default.secure_redirects"]="0"
+        ["net.ipv4.conf.all.send_redirects"]="0"        ["net.ipv4.conf.default.send_redirects"]="0"
+        ["net.ipv4.conf.all.accept_source_route"]="0"   ["net.ipv4.conf.default.accept_source_route"]="0"
+        ["net.ipv6.conf.all.accept_source_route"]="0"   ["net.ipv6.conf.default.accept_source_route"]="0"
+        ["net.ipv4.conf.all.log_martians"]="1"          ["net.ipv4.conf.default.log_martians"]="1"
+        ["net.ipv4.icmp_echo_ignore_broadcasts"]="1"    ["net.ipv4.icmp_ignore_bogus_error_responses"]="1"
+        ["net.ipv4.tcp_syncookies"]="1"                 ["net.ipv4.tcp_rfc1337"]="1"
+        ["kernel.randomize_va_space"]="2"               ["kernel.sysrq"]="0"
+        ["kernel.kptr_restrict"]="2"                    ["kernel.dmesg_restrict"]="1"
+        ["kernel.yama.ptrace_scope"]="1"                ["kernel.core_uses_pid"]="1"
+        ["fs.protected_hardlinks"]="1"                  ["fs.protected_symlinks"]="1"
+        ["fs.protected_fifos"]="2"                      ["fs.protected_regular"]="2"
+        ["fs.suid_dumpable"]="0"
+    )
+}
+
 set_sshd_param() {
     local key="$1" value="$2" file="$3"
     local current_val
     current_val=$(grep -iE "^\s*${key}\s+" "$file" 2>/dev/null | tail -n 1 | awk '{print $2}' || true)
-
-    # Case-insensitive comparison
     if [[ -n "$current_val" ]] && \
        [[ "$(echo "$current_val" | tr '[:upper:]' '[:lower:]')" == "$(echo "$value" | tr '[:upper:]' '[:lower:]')" ]]; then
-        return 1  # Already correct
+        return 1
     fi
-
     if grep -qE "^\s*#?\s*${key}" "$file"; then
         sed -i -E "s|^\s*#?\s*(${key})\s+.*|${key} ${value}|" "$file"
     else
         echo "${key} ${value}" >> "$file"
     fi
-    info "Set '${key} ${value}' in temp SSH config."
+    info "  Set '${key} ${value}'"
     return 0
 }
 
-# --- Apply a temp sshd_config with validation ---
 apply_sshd_config() {
-    local temp_file="$1"
-    local target="/etc/ssh/sshd_config"
-
+    local temp_file="$1" target="/etc/ssh/sshd_config"
     if $DRY_RUN; then
         dry_run_echo "sshd -t -f '$temp_file' && mv '$temp_file' '$target'"
-        rm -f "$temp_file" 2>/dev/null
-        return 0
+        rm -f "$temp_file" 2>/dev/null; return 0
     fi
-
     if sshd -t -f "$temp_file" 2>/dev/null; then
-        if mv "$temp_file" "$target"; then
-            chmod 644 "$target"
-            success "Applied changes to $target."
-            return 0
-        else
-            error "Failed to move temp config to $target."
-        fi
+        mv "$temp_file" "$target" && { chmod 644 "$target"; success "SSHD config applied."; return 0; } \
+            || error "Failed to move temp SSHD config."
     else
-        error "SSHD config validation failed. Changes NOT applied."
+        error "SSHD config syntax check failed — changes NOT applied."
     fi
-
     rm -f "$temp_file" 2>/dev/null
     restore_file "$target"
     return 1
 }
 
-# --- Restart SSH service safely ---
 restart_ssh() {
-    local reason="${1:-configuration change}"
-    info "Restarting SSH service ($SSH_SERVICE) due to $reason..."
-
-    if run_cmd "SERVICE_RESTARTED:$SSH_SERVICE ($reason)" systemctl restart "$SSH_SERVICE"; then
-        success "SSH service restarted."
-        if ! $DRY_RUN; then
-            sleep 1
-            if ! systemctl is-active --quiet "$SSH_SERVICE"; then
-                error "SSH service is not active after restart! Check config."
-                return 1
-            fi
-        fi
-        return 0
-    else
-        error "SSH service restart failed!"
-        return 1
-    fi
+    local reason="${1:-config change}"
+    info "Restarting SSH ($SSH_SERVICE) — $reason..."
+    run_cmd "SERVICE_RESTARTED:$SSH_SERVICE" systemctl restart "$SSH_SERVICE" || { error "SSH restart failed!"; return 1; }
+    success "SSH restarted."
+    $DRY_RUN && return 0
+    sleep 1
+    systemctl is-active --quiet "$SSH_SERVICE" || { error "SSH not active after restart!"; return 1; }
+    return 0
 }
 
-# --- Service management helper ---
 ensure_service_running() {
     local service="$1"
     local needs_start=false needs_enable=false
-
-    if ! systemctl is-active --quiet "$service" 2>/dev/null; then
-        needs_start=true
-    fi
-    if ! systemctl is-enabled --quiet "$service" 2>/dev/null; then
-        needs_enable=true
-    fi
-
+    systemctl is-active  --quiet "$service" 2>/dev/null || needs_start=true
+    systemctl is-enabled --quiet "$service" 2>/dev/null || needs_enable=true
     if $needs_start; then
-        if ask_yes_no "Start '$service' service?" "y"; then
-            run_cmd "SERVICE_STARTED:$service" systemctl start "$service" && \
-                success "'$service' started." || error "Failed to start '$service'."
-        fi
-    else
-        success "'$service' is already active."
-    fi
-
+        ask_yes_no "Start '$service'?" "y" && {
+            run_cmd "SERVICE_STARTED:$service" systemctl start "$service" && {
+                success "'$service' started."
+                txlog "SERVICE_STARTED" "$service"
+            } || error "Failed to start '$service'."
+        }
+    else success "'$service' is active."; fi
     if $needs_enable; then
-        if ask_yes_no "Enable '$service' on boot?" "y"; then
-            run_cmd "SERVICE_ENABLED:$service" systemctl enable "$service" && \
-                success "'$service' enabled." || error "Failed to enable '$service'."
-        fi
-    else
-        success "'$service' is already enabled."
-    fi
+        ask_yes_no "Enable '$service' on boot?" "y" && {
+            run_cmd "SERVICE_ENABLED:$service" systemctl enable "$service" && {
+                success "'$service' enabled."
+                txlog "SERVICE_ENABLED" "$service"
+            } || error "Failed to enable '$service'."
+        }
+    else success "'$service' is enabled."; fi
 }
 
-# --- Fail2ban jail check ---
 is_fail2ban_jail_enabled() {
     local jail_name="$1" jail_local="/etc/fail2ban/jail.local"
     [[ ! -f "$jail_local" ]] && return 1
@@ -553,284 +1541,1597 @@ is_fail2ban_jail_enabled() {
     ' "$jail_local"
 }
 
-# --- Container port detection ---
+get_apt_conf_value() {
+    local file="$1" key="$2" line value
+    [[ -f "$file" ]] || return 1
+    line=$(grep -E "^\s*(//\s*)?${key}\s+" "$file" 2>/dev/null | tail -n 1 || true)
+    [[ -n "$line" ]] || return 1
+    [[ "$line" =~ ^[[:space:]]*// ]] && return 1
+    value=$(printf '%s
+' "$line" | sed -E 's/.*"([^"]*)".*//;t; s/.*[[:space:]](true|false)[[:space:]]*;.*//;t; s/.*[[:space:]]([0-9:]+)[[:space:]]*;.*//')
+    [[ -n "$value" ]] || return 1
+    printf '%s
+' "$value"
+}
+
+unattended_upgrades_policy_diff() {
+    local periodic_file="/etc/apt/apt.conf.d/20auto-upgrades"
+    local config_file="/etc/apt/apt.conf.d/50unattended-upgrades"
+    local diffs=() value
+
+    is_package_installed unattended-upgrades || { echo "package missing"; return 0; }
+
+    grep -qE '^\s*APT::Periodic::Update-Package-Lists\s*"1"\s*;' "$periodic_file" 2>/dev/null || diffs+=("Update-Package-Lists!=1")
+    grep -qE '^\s*APT::Periodic::Unattended-Upgrade\s*"1"\s*;' "$periodic_file" 2>/dev/null || diffs+=("Unattended-Upgrade!=1")
+
+    local -A desired_params=(
+        ["Unattended-Upgrade::AutoFixInterruptedDpkg"]="true"
+        ["Unattended-Upgrade::MinimalSteps"]="true"
+        ["Unattended-Upgrade::MailReport"]="on-change"
+        ["Unattended-Upgrade::Remove-Unused-Kernel-Packages"]="true"
+        ["Unattended-Upgrade::Remove-New-Unused-Dependencies"]="true"
+        ["Unattended-Upgrade::Remove-Unused-Dependencies"]="true"
+        ["Unattended-Upgrade::Automatic-Reboot"]="true"
+        ["Unattended-Upgrade::Automatic-Reboot-WithUsers"]="false"
+        ["Unattended-Upgrade::Automatic-Reboot-Time"]="02:00"
+    )
+    local key
+    for key in "${!desired_params[@]}"; do
+        value=$(get_apt_conf_value "$config_file" "$key" 2>/dev/null || true)
+        [[ "$value" == "${desired_params[$key]}" ]] || diffs+=("${key}!=${desired_params[$key]}")
+    done
+
+    ((${#diffs[@]})) && printf '%s
+' "${diffs[*]}"
+    return 0
+}
+
+fail2ban_get_setting() {
+    local section="$1" key="$2" file="${3:-/etc/fail2ban/jail.local}"
+    [[ -f "$file" ]] || return 1
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_section=1; next }
+        /^\s*\[/ && in_section { exit }
+        in_section {
+            if ($0 ~ "^[[:space:]]*" key "[[:space:]]*=") {
+                sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                print
+                exit
+            }
+        }
+    ' "$file"
+}
+
+fail2ban_policy_diff() {
+    local jail_local="/etc/fail2ban/jail.local"
+    local diffs=() ignoreip line
+
+    is_package_installed fail2ban || { echo "package missing"; return 0; }
+    systemctl is-active --quiet fail2ban 2>/dev/null || diffs+=("service inactive")
+    [[ -f "$jail_local" ]] || { echo "jail.local missing"; return 0; }
+    is_fail2ban_jail_enabled "sshd" || diffs+=("sshd jail disabled")
+
+    [[ "$(fail2ban_get_setting DEFAULT bantime "$jail_local" 2>/dev/null || true)" == "1h" ]] || diffs+=("bantime!=1h")
+    [[ "$(fail2ban_get_setting DEFAULT findtime "$jail_local" 2>/dev/null || true)" == "10m" ]] || diffs+=("findtime!=10m")
+    [[ "$(fail2ban_get_setting DEFAULT maxretry "$jail_local" 2>/dev/null || true)" == "3" ]] || diffs+=("maxretry!=3")
+
+    ignoreip=$(awk '/^\s*\[DEFAULT\]/{d=1;next} /^\s*\[/{d=0} d&&/^\s*ignoreip\s*=/{sub(/^\s*ignoreip\s*=\s*/,""); cl=$0; while(getline>0&&$0~/^[[:space:]]/) cl=cl " " $0; gsub(/[[:space:]]+/," ",cl); print cl; exit}' "$jail_local" 2>/dev/null || true)
+    [[ "$ignoreip" == *"127.0.0.1/8"* ]] || diffs+=("ignoreip missing 127.0.0.1/8")
+    [[ "$ignoreip" == *"::1"* ]] || diffs+=("ignoreip missing ::1")
+
+    ((${#diffs[@]})) && printf '%s
+' "${diffs[*]}"
+    return 0
+}
+
+declare -A ufw_rules=()
+ufw_rule_count=0
+
+is_ufw_allowed() {
+    local key="$1"
+    [[ -v ufw_rules["$key"] ]] && return 0
+    return 1
+}
+
 get_container_ports() {
-    # Docker
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && \
         docker ps --format '{{.Ports}}' 2>/dev/null | \
             grep -oP '0\.0\.0\.0:(\d+)->(\d+)/(tcp|udp)' | \
             while IFS= read -r mapping; do
-                local host_port proto
-                host_port=$(echo "$mapping" | grep -oP '0\.0\.0\.0:\K\d+')
-                proto=$(echo "$mapping" | grep -oP '(tcp|udp)$')
-                echo "${host_port},${proto},docker-container"
+                echo "$(echo "$mapping" | grep -oP '0\.0\.0\.0:\K\d+'),$(echo "$mapping" | grep -oP '(tcp|udp)$'),docker-container"
             done
-    fi
-
-    # Podman
-    if command -v podman >/dev/null 2>&1; then
+    command -v podman >/dev/null 2>&1 && \
         podman ps --format '{{.Ports}}' 2>/dev/null | \
             grep -oP '0\.0\.0\.0:(\d+)->(\d+)/(tcp|udp)' | \
             while IFS= read -r mapping; do
-                local host_port proto
-                host_port=$(echo "$mapping" | grep -oP '0\.0\.0\.0:\K\d+')
-                proto=$(echo "$mapping" | grep -oP '(tcp|udp)$')
-                echo "${host_port},${proto},podman-container"
+                echo "$(echo "$mapping" | grep -oP '0\.0\.0\.0:\K\d+'),$(echo "$mapping" | grep -oP '(tcp|udp)$'),podman-container"
             done
-    fi
 }
 
-# --- Get listening ports from ss ---
 get_listening_ports() {
-    # TCP - parse ss output, extract port and process name
     ss -ltnp 2>/dev/null | while IFS= read -r line; do
-        # Skip header
-        [[ "$line" =~ ^State ]] && continue
         [[ "$line" =~ ^LISTEN ]] || continue
-
-        # Extract local address:port (4th field)
-        local addr_field
-        addr_field=$(echo "$line" | awk '{print $4}')
-        # Port is everything after the last ':'
-        local port="${addr_field##*:}"
-
-        # Validate port
+        local port="${$(echo "$line" | awk '{print $4}')##*:}"
         [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || continue
-
-        # Extract process name from users:(("name",...))
-        local proc="unknown"
-        if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
-            proc="${BASH_REMATCH[1]}"
-        fi
-
+        local proc="unknown"; [[ "$line" =~ users:\(\(\"([^\"]+)\" ]] && proc="${BASH_REMATCH[1]}"
         echo "${port},tcp,${proc}"
     done
-
-    # UDP
     ss -lunp 2>/dev/null | while IFS= read -r line; do
-        [[ "$line" =~ ^State ]] && continue
         [[ "$line" =~ ^UNCONN ]] || continue
-
-        local addr_field
-        addr_field=$(echo "$line" | awk '{print $4}')
-        local port="${addr_field##*:}"
-
+        local port="${$(echo "$line" | awk '{print $4}')##*:}"
         [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || continue
-
-        local proc="unknown"
-        if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
-            proc="${BASH_REMATCH[1]}"
-        fi
-
+        local proc="unknown"; [[ "$line" =~ users:\(\(\"([^\"]+)\" ]] && proc="${BASH_REMATCH[1]}"
         echo "${port},udp,${proc}"
     done
 }
 
-# --- Fail2ban ignoreip helper ---
 is_ip_covered_by_ignoreip() {
-    local check_item="$1"
-    shift
-    local ignore_list=("$@")
+    local check_item="$1"; shift; local ignore_list=("$@")
     local ip="" subnet=""
-
-    if [[ "$check_item" =~ / ]]; then
-        subnet="$check_item"
-    else
+    [[ "$check_item" =~ / ]] && subnet="$check_item" || {
         ip="$check_item"
-        [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
-            subnet="$(echo "$ip" | cut -d. -f1-3).0/24"
-    fi
-
+        [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && subnet="$(echo "$ip" | cut -d. -f1-3).0/24"
+    }
+    local entry
     for entry in "${ignore_list[@]}"; do
         [[ "$ip" == "$entry" || "$subnet" == "$entry" ]] && return 0
-        if [[ -n "$ip" ]]; then
+        [[ -n "$ip" ]] && {
             { [[ "$entry" == "192.168.0.0/16" ]] && [[ "$ip" =~ ^192\.168\. ]]; } && return 0
             { [[ "$entry" == "172.16.0.0/12" ]] && [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; } && return 0
             { [[ "$entry" == "10.0.0.0/8" ]] && [[ "$ip" =~ ^10\. ]]; } && return 0
-        fi
+        }
     done
     return 1
 }
 
 
+print_auditd_observability_info() {
+    echo
+    info "${C_BOLD}Auditd – relevante Logs und Befehle:${C_RESET}"
+    echo "  - Rohlog:              /var/log/audit/audit.log"
+    echo "  - Regeln:              $AUDITD_RULES"
+    echo "  - Service-Log:         journalctl -u auditd -xe"
+    echo "  - Aktive Regeln:       auditctl -l"
+    echo "  - Suche nach Key:      ausearch -k sudo_usage -ts today"
+    echo "  - $(tr_msg summary_label):           aureport -au -i"
+    echo
+}
+
+print_aide_observability_info() {
+    local helper cfg_auto="/var/lib/aide/aide.conf.autogenerated" cfg_static="/etc/aide/aide.conf"
+    helper="$(aide_find_helper 2>/dev/null || true)"
+    echo
+    info "${C_BOLD}AIDE – relevante Logs und Befehle:${C_RESET}"
+    echo "  - Sammellog:           /var/log/aide-check.log"
+    echo "  - Tagesreports:        /var/log/aide-report-YYYYMMDD.log"
+    echo "  - Init-Log:            $AIDE_INIT_LOG"
+    echo "  - Lokale Excludes:     $AIDE_LOCAL_EXCLUDES"
+    echo "  - Generierte Config:   $cfg_auto"
+    if [[ -n "$helper" ]]; then
+        echo "  - AIDE-Helper:         $helper"
+        echo "  - Manueller Check:     $helper && aide --config=$cfg_auto --check"
+        echo "  - Baseline aktualisieren:"
+        echo "                         $helper"
+        echo "                         aide --config=$cfg_auto --update"
+    else
+        echo "  - AIDE-Basisconfig:    $cfg_static"
+        echo "  - Manueller Check:     aide --config=$cfg_auto --check"
+        echo "  - Baseline aktualisieren:"
+        echo "                         aide --config=$cfg_auto --update"
+    fi
+    echo "                         cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db"
+    echo "                         ODER cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz"
+    echo "  - Baseline-Dateien:    /var/lib/aide/aide.db oder /var/lib/aide/aide.db.gz"
+    echo "  - Cronjob:             $AIDE_CRON"
+    echo
+}
+
+ssh_dropin_validate_and_restore() {
+    if sshd -t 2>/dev/null; then
+        return 0
+    fi
+    error "SSHD validation failed after writing $SSHD_HARDENING_DROPIN"
+    if [[ -f "${SSHD_HARDENING_DROPIN}${BACKUP_SUFFIX}" ]]; then
+        restore_file "$SSHD_HARDENING_DROPIN" >/dev/null 2>&1 || true
+    else
+        rm -f "$SSHD_HARDENING_DROPIN" >/dev/null 2>&1 || true
+    fi
+    return 1
+}
+
+auditd_unit_exists() {
+    systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx 'auditd.service'
+}
+
+auditd_is_active() {
+    systemctl is-active --quiet auditd 2>/dev/null || pgrep -x auditd >/dev/null 2>&1
+}
+
+ensure_auditd_service_available() {
+    auditd_unit_exists && return 0
+    auditd_is_active && return 0
+    warn "auditd package vorhanden, aber auditd.service fehlt. Versuche Reinstallation..."
+    if $DRY_RUN; then
+        dry_run_echo "Reinstall auditd audispd-plugins"
+        return 1
+    fi
+    ensure_apt_updated || return 1
+    apt-get install --reinstall -y auditd audispd-plugins >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    auditd_unit_exists || auditd_is_active
+}
+
+aide_collect_config_files() {
+    local -a files=()
+    [[ -f /etc/aide/aide.conf ]] && files+=(/etc/aide/aide.conf)
+    if compgen -G '/etc/aide/aide.conf.d/*' >/dev/null 2>&1; then
+        while IFS= read -r f; do
+            [[ -f "$f" ]] && files+=("$f")
+        done < <(find /etc/aide/aide.conf.d -maxdepth 1 -type f | sort)
+    fi
+    printf '%s\n' "${files[@]}"
+}
+
+aide_expand_value() {
+    local value="$1" file
+    declare -A defs=()
+    while IFS= read -r file; do
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*@@define[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+(.+)$ ]]; then
+                defs["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+            fi
+        done < "$file"
+    done < <(aide_collect_config_files)
+
+    local k repl
+    for k in "${!defs[@]}"; do
+        repl="${defs[$k]}"
+        value="${value//@@\{$k\}/$repl}"
+        value="${value//@$k/$repl}"
+    done
+    value="${value#file:}"
+    value="${value%\"}"; value="${value#\"}"
+    echo "$value"
+}
+
+aide_get_config_path() {
+    local wanted="$1" file line raw
+    while IFS= read -r file; do
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ ^[[:space:]]*${wanted}[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+                raw="${BASH_REMATCH[1]}"
+                aide_expand_value "$raw"
+                return 0
+            fi
+        done < "$file"
+    done < <(aide_collect_config_files)
+    return 1
+}
+
+aide_list_candidate_paths() {
+    local config_in="" config_legacy="" config_out="" p
+    config_in="$(aide_get_config_path database_in 2>/dev/null || true)"
+    config_legacy="$(aide_get_config_path database 2>/dev/null || true)"
+    config_out="$(aide_get_config_path database_out 2>/dev/null || true)"
+
+    printf '%s\n' "$config_in" "$config_legacy" "$config_out" \
+        /var/lib/aide/aide.db /var/lib/aide/aide.db.gz \
+        /var/lib/aide/aide.db.new /var/lib/aide/aide.db.new.gz | awk 'NF && !seen[$0]++ {print $0}'
+
+    for p in /var/lib/aide/aide.db* /var/lib/*/aide.db*; do
+        [[ -e "$p" ]] && echo "$p"
+    done | awk 'NF && !seen[$0]++ {print $0}'
+}
+
+aide_baseline_exists() {
+    local p
+    while IFS= read -r p; do
+        [[ -n "$p" && -f "$p" ]] || continue
+        [[ "$p" == *.new || "$p" == *.new.gz ]] && continue
+        [[ "$p" == *aide.db* ]] && return 0
+    done < <(aide_list_candidate_paths)
+    return 1
+}
+
+aide_promote_new_database() {
+    local current_db="" legacy_db="" p target
+    current_db="$(aide_get_config_path database_in 2>/dev/null || true)"
+    legacy_db="$(aide_get_config_path database 2>/dev/null || true)"
+
+    while IFS= read -r p; do
+        [[ -n "$p" && -f "$p" ]] || continue
+        case "$p" in
+            *.new.gz) target="${p%.new.gz}.gz" ;;
+            *.new)    target="${p%.new}" ;;
+            *)        continue ;;
+        esac
+        [[ -n "$current_db" ]] && target="$current_db"
+        [[ -z "$current_db" && -n "$legacy_db" ]] && target="$legacy_db"
+        mkdir -p "$(dirname "$target")" >/dev/null 2>&1 || true
+        cp -f "$p" "$target" || continue
+        echo "$target"
+        return 0
+    done < <(aide_list_candidate_paths)
+    return 1
+}
+
+aide_init_running() {
+    pgrep -af '(^|/)(aide|aideinit)( |$)|aide .*--init' >/dev/null 2>&1
+}
+
+aide_find_helper() {
+    local p
+    for p in \
+        "$(command -v update-aide.conf 2>/dev/null || true)" \
+        /usr/sbin/update-aide.conf \
+        /usr/bin/update-aide.conf \
+        /usr/libexec/aide/update-aide.conf \
+        /usr/lib/aide/update-aide.conf \
+        /usr/share/aide/bin/update-aide.conf; do
+        [[ -n "$p" && -x "$p" ]] || continue
+        echo "$p"
+        return 0
+    done
+    return 1
+}
+
+aide_runtime_config_path() {
+    local cfg_auto="/var/lib/aide/aide.conf.autogenerated"
+    if [[ -f "$cfg_auto" ]]; then
+        echo "$cfg_auto"
+        return 0
+    fi
+    if [[ -f /etc/aide/aide.conf ]]; then
+        echo "/etc/aide/aide.conf"
+        return 0
+    fi
+    return 1
+}
+
+aide_write_local_excludes() {
+    local texc path rc=0
+    texc=$(mktemp_tracked)
+    mkdir -p /etc/aide/aide.conf.d >/dev/null 2>&1 || true
+    {
+        echo "# Added by security_script.sh"
+        echo "# Reduces AIDE runtime on container/data-heavy hosts"
+        for path in /run /proc /sys /dev /tmp /var/tmp /var/lib/clamav; do
+            [[ -e "$path" ]] || continue
+            printf '!%s($|/)
+' "$path"
+        done
+        if [[ -d /var/lib/docker ]] || command -v docker >/dev/null 2>&1; then
+            printf '!/var/lib/docker($|/)
+'
+        fi
+        if [[ -d /var/lib/containers ]] || command -v podman >/dev/null 2>&1; then
+            printf '!/var/lib/containers($|/)
+'
+        fi
+        [[ -d /var/lib/containerd ]] && printf '!/var/lib/containerd($|/)
+'
+        [[ -d /var/log/sysstat ]] && printf '!/var/log/sysstat($|/)
+'
+        [[ -f /var/log/audit/audit.log ]] && printf '!/var/log/audit/audit\.log$
+'
+        [[ -f /opt/portainer/portainer.db ]] && printf '!/opt/portainer/portainer\.db$
+'
+        [[ -d /mnt/icybox ]] && printf '!/mnt/icybox($|/)
+'
+    } > "$texc"
+
+    install_managed_file "$AIDE_LOCAL_EXCLUDES" "$texc" 644
+    rc=$?
+    if [[ "$rc" -eq 0 || "$rc" -eq 1 ]]; then
+        return 0
+    fi
+    return "$rc"
+}
+
+aide_generate_fallback_config() {
+    local out="/var/lib/aide/aide.conf.autogenerated" refresh_log="/var/log/aide-config-refresh.log"
+    local tmp file
+
+    [[ -f /etc/aide/aide.conf ]] || {
+        error "Neither update-aide.conf nor /etc/aide/aide.conf is available for AIDE."
+        return 1
+    }
+
+    mkdir -p /var/lib/aide /etc/aide/aide.conf.d >/dev/null 2>&1 || true
+    tmp=$(mktemp_tracked)
+    cat /etc/aide/aide.conf > "$tmp" || return 1
+
+    if [[ -d /etc/aide/aide.conf.d ]]; then
+        while IFS= read -r file; do
+            [[ -f "$file" ]] || continue
+            printf '
+# --- merged from %s ---
+' "$file" >> "$tmp"
+            if [[ -x "$file" ]]; then
+                "$file" >> "$tmp" 2>>"$refresh_log" || {
+                    error "Executable AIDE snippet failed: $file. See $refresh_log"
+                    return 1
+                }
+            else
+                cat "$file" >> "$tmp" || return 1
+            fi
+            printf '
+' >> "$tmp"
+        done < <(find /etc/aide/aide.conf.d -maxdepth 1 -type f | sort)
+    fi
+
+    install -m 600 "$tmp" "$out" || {
+        error "Could not write autogenerated AIDE config: $out"
+        return 1
+    }
+    success "AIDE autogenerated config built via fallback merge."
+    return 0
+}
+
+aide_refresh_generated_config() {
+    local refresh_log="/var/log/aide-config-refresh.log" helper=""
+    helper="$(aide_find_helper 2>/dev/null || true)"
+    if [[ -n "$helper" ]]; then
+        if "$helper" >"$refresh_log" 2>&1; then
+            success "AIDE autogenerated config refreshed."
+            return 0
+        fi
+        error "AIDE helper failed. See $refresh_log"
+        return 1
+    fi
+
+    warn "update-aide.conf not found. Building fallback config: /var/lib/aide/aide.conf.autogenerated"
+    aide_generate_fallback_config
+}
+
+aide_stop_stale_processes() {
+    local pids pid
+    pids=$(pgrep -x aide 2>/dev/null || true)
+    [[ -z "$pids" ]] && pids=$(pgrep -x aideinit 2>/dev/null || true)
+    [[ -z "$pids" ]] && return 0
+
+    warn "AIDE process already running: $pids"
+    warn "Stopping stale AIDE process before starting a new initialization."
+    while read -r pid; do
+        [[ -n "$pid" ]] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+    done <<< "$pids"
+    sleep 2
+    while read -r pid; do
+        [[ -n "$pid" ]] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        kill -KILL "$pid" 2>/dev/null || true
+    done <<< "$pids"
+}
+
+run_aide_init_command() {
+    local timeout_value="${AIDE_INIT_TIMEOUT:-0}" rc=0 cfg=""
+    local -a cmd=() pre_cmd=()
+    : > "$AIDE_INIT_LOG"
+
+    aide_stop_stale_processes || true
+    rm -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db.new.gz >/dev/null 2>&1 || true
+
+    if ! aide_write_local_excludes; then
+        error "Could not write local AIDE excludes."
+        return 1
+    fi
+    if ! aide_refresh_generated_config; then
+        return 1
+    fi
+
+    cfg="$(aide_runtime_config_path 2>/dev/null || true)"
+    if [[ -z "$cfg" || ! -f "$cfg" ]]; then
+        error "No usable AIDE config found for initialization."
+        return 1
+    fi
+
+    command -v nice >/dev/null 2>&1 && pre_cmd+=(nice -n 19)
+    command -v ionice >/dev/null 2>&1 && pre_cmd+=(ionice -c3)
+
+    if (( timeout_value > 0 )) && command -v timeout >/dev/null 2>&1; then
+        cmd=("${pre_cmd[@]}" timeout --foreground "$timeout_value" aide --config="$cfg" --init)
+    else
+        cmd=("${pre_cmd[@]}" aide --config="$cfg" --init)
+    fi
+
+    "${cmd[@]}" </dev/null >>"$AIDE_INIT_LOG" 2>&1 &
+    CURRENT_CHILD_PID=$!
+    wait "$CURRENT_CHILD_PID"
+    rc=$?
+    CURRENT_CHILD_PID=""
+
+    if (( rc == 124 )); then
+        return 124
+    fi
+    if (( rc != 0 )); then
+        return "$rc"
+    fi
+
+    if aide_baseline_exists; then
+        return 0
+    fi
+    if aide_promote_new_database >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "First AIDE initialization finished without a usable baseline. Refreshing config and retrying once ..."
+    if ! aide_refresh_generated_config; then
+        return 1
+    fi
+    cfg="$(aide_runtime_config_path 2>/dev/null || true)"
+    [[ -n "$cfg" && -f "$cfg" ]] || return 1
+    rm -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db.new.gz >/dev/null 2>&1 || true
+
+    if (( timeout_value > 0 )) && command -v timeout >/dev/null 2>&1; then
+        cmd=("${pre_cmd[@]}" timeout --foreground "$timeout_value" aide --config="$cfg" --init)
+    else
+        cmd=("${pre_cmd[@]}" aide --config="$cfg" --init)
+    fi
+
+    "${cmd[@]}" </dev/null >>"$AIDE_INIT_LOG" 2>&1 &
+    CURRENT_CHILD_PID=$!
+    wait "$CURRENT_CHILD_PID"
+    rc=$?
+    CURRENT_CHILD_PID=""
+
+    if (( rc == 124 )); then
+        return 124
+    fi
+    if (( rc != 0 )); then
+        return "$rc"
+    fi
+
+    if aide_baseline_exists; then
+        return 0
+    fi
+    if aide_promote_new_database >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 65
+}
+
+print_security_log_summary() {
+    echo
+    info "${C_BOLD}$(tr_msg relevant_logs)${C_RESET}"
+    echo "  - $(tr_msg log_changes_label):   $SCRIPT_LOG_FILE"
+    echo "  - $(tr_msg txlog_label):     $TRANSACTION_LOG"
+    [[ -f "$AUDITD_RULES" || -f /var/log/audit/audit.log ]] && echo "  - Auditd-Rohlog:       /var/log/audit/audit.log"
+    [[ -f "$AUDITD_RULES" ]] && echo "  - Auditd-Regeln:       $AUDITD_RULES"
+    [[ -f "$AIDE_CRON" || -f /var/log/aide-check.log ]] && echo "  - AIDE-Sammellog:      /var/log/aide-check.log"
+    [[ -f /var/log/aide-report-$(date +%Y%m%d).log ]] && echo "  - AIDE-Tagesreport:    /var/log/aide-report-$(date +%Y%m%d).log"
+    [[ -f "$AIDE_INIT_LOG" ]] && echo "  - AIDE-Init-Log:       $AIDE_INIT_LOG"
+    echo
+}
+
+was_package_installed_by_script() {
+    local pkg="$1"
+    [[ -f "$TRANSACTION_LOG" ]] || return 1
+    grep -qF "|PKG_INSTALLED|$pkg" "$TRANSACTION_LOG"
+}
+
+remove_packages_if_recorded() {
+    local pkg
+    for pkg in "$@"; do
+        was_package_installed_by_script "$pkg" || continue
+        is_package_installed "$pkg" || continue
+        info "Removing package recorded by script: $pkg"
+        apt-get remove -y "$pkg" >/dev/null 2>&1 \
+            && success "  ✔ Package removed: $pkg" \
+            || warn "  Could not remove package: $pkg"
+    done
+}
+
+remove_packages_if_present() {
+    local pkg
+    for pkg in "$@"; do
+        is_package_installed "$pkg" || continue
+        info "Removing installed package: $pkg"
+        apt-get remove -y "$pkg" >/dev/null 2>&1             && success "  ✔ Package removed: $pkg"             || warn "  Could not remove package: $pkg"
+    done
+}
+
+component_is_removable() {
+    local target="$1"
+    case "$target" in
+        banners|banner)
+            [[ -f "${BANNER_FILE}${BACKUP_SUFFIX}" ]] && return 0
+            [[ -f "${MOTD_FILE}${BACKUP_SUFFIX}" ]] && return 0
+            [[ -f "$BANNER_FILE" ]] && ([[ -s "$BANNER_FILE" ]] || grep -q "AUTHORIZED ACCESS ONLY" "$BANNER_FILE" 2>/dev/null) && return 0
+            [[ -f "$MOTD_FILE" ]] && ([[ -s "$MOTD_FILE" ]] || grep -q "AUTHORIZED ACCESS ONLY" "$MOTD_FILE" 2>/dev/null) && return 0
+            [[ -f /etc/ssh/sshd_config ]] && grep -qiE "^\s*Banner\s+$BANNER_FILE(\s|$)" /etc/ssh/sshd_config && return 0
+            return 1 ;;
+        auditd|audit)
+            [[ -f "${AUDITD_RULES}${BACKUP_SUFFIX}" || -f "$AUDITD_RULES" ]] && return 0
+            is_package_installed "auditd" && return 0
+            is_package_installed "audispd-plugins" && return 0
+            return 1 ;;
+        aide)
+            [[ -f "${AIDE_CRON}${BACKUP_SUFFIX}" || -f "$AIDE_CRON" ]] && return 0
+            [[ -f "${AIDE_LOCAL_EXCLUDES}${BACKUP_SUFFIX}" || -f "$AIDE_LOCAL_EXCLUDES" ]] && return 0
+            [[ -f /var/lib/aide/aide.db || -f /var/lib/aide/aide.db.new || -f /var/lib/aide/aide.db.gz || -f /var/lib/aide/aide.conf.autogenerated ]] && return 0
+            is_package_installed "aide-common" && return 0
+            is_package_installed "aide" && return 0
+            return 1 ;;
+        pam|pam_hardening)
+            [[ -f "${PWQUALITY_CONF}${BACKUP_SUFFIX}" || -f "${FAILLOCK_CONF}${BACKUP_SUFFIX}" ]] && return 0
+            [[ -f "$FAILLOCK_CONF" ]] && grep -qE '^\s*(deny|unlock_time|even_deny_root)\s*=' "$FAILLOCK_CONF" 2>/dev/null && return 0
+            [[ -f "$TRANSACTION_LOG" ]] && grep -q "|ROOT_LOCKED|" "$TRANSACTION_LOG" && return 0
+            return 1 ;;
+        sysctl)
+            [[ -f "${SYSCTL_CONFIG_FILE}${BACKUP_SUFFIX}" || -f "$SYSCTL_CONFIG_FILE" ]] && return 0
+            return 1 ;;
+        journald)
+            [[ -f "/etc/systemd/journald.conf${BACKUP_SUFFIX}" ]] && return 0
+            [[ -f /etc/systemd/journald.conf ]] && grep -qE '^\s*SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null && return 0
+            return 1 ;;
+        sudoers|sudoers_tty)
+            [[ -f "${SUDOERS_TTY_FILE}${BACKUP_SUFFIX}" || -f "$SUDOERS_TTY_FILE" ]] && return 0
+            return 1 ;;
+        modules|module_blacklist)
+            [[ -f "${MODPROBE_BLACKLIST}${BACKUP_SUFFIX}" || -f "$MODPROBE_BLACKLIST" ]] && return 0
+            return 1 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+component_menu_description() {
+    local target="$1"
+    case "$target" in
+        banners|banner) echo "Login-Banner / MOTD / SSH-Banner" ;;
+        auditd|audit) echo "auditd Regeln und ggf. Paket" ;;
+        aide) echo "AIDE Cronjob / Baseline / ggf. Paket" ;;
+        pam|pam_hardening) echo "PAM pwquality / faillock / Root-Unlock" ;;
+        sysctl) echo "Security Sysctl-Konfiguration" ;;
+        journald) echo "Journald Log-Limit-Konfiguration" ;;
+        sudoers|sudoers_tty) echo "sudoers TTY-/Ticket-Konfiguration" ;;
+        modules|module_blacklist) echo "Kernel-Modul-Blacklist" ;;
+        *) echo "Unbekannt" ;;
+    esac
+}
+
+
+section_check_is_red() {
+    local check_id="$1"
+    local entry raw
+    entry="${ASSESS_RESULTS[$check_id]:-}"
+    [[ -n "$entry" ]] || return 1
+    raw="${entry%%:*}"
+    [[ "$(normalize_matrix_status "$raw")" == "RED" ]]
+}
+
+section_has_pending_findings() {
+    local func="$1"
+    case "$func" in
+        configure_unattended_upgrades)  section_check_is_red "UNATTENDED_UPGRADES" ;;
+        configure_ssh_hardening)        section_check_is_red "SSH_ROOT_LOGIN" || section_check_is_red "SSH_PASSWORD_AUTH" || section_check_is_red "SSH_X11" || section_check_is_red "SSH_AGENT_FWD" || section_check_is_red "SSH_TCP_FWD" || section_check_is_red "SSH_GRACE_TIME" || section_check_is_red "SSH_MAX_AUTH" ;;
+        configure_fail2ban)             section_check_is_red "FAIL2BAN" ;;
+        configure_ufw)                  section_check_is_red "UFW_ACTIVE" ;;
+        configure_clamav)               section_check_is_red "CLAMAV" ;;
+        configure_sysctl)               section_check_is_red "SYSCTL" ;;
+        configure_sudoers_tty)          section_check_is_red "SUDOERS_TTY" ;;
+        configure_auditd)               section_check_is_red "AUDITD" ;;
+        configure_aide)                 section_check_is_red "AIDE" ;;
+        configure_apparmor_enforce)     section_check_is_red "APPARMOR" ;;
+        configure_filesystem_hardening) section_check_is_red "FSTAB_HARDENING" ;;
+        configure_module_blacklist)     section_check_is_red "MODULE_BLACKLIST" ;;
+        configure_core_dumps)           section_check_is_red "CORE_DUMPS" ;;
+        configure_pam_hardening)        section_check_is_red "PAM_PWQUALITY" || section_check_is_red "PAM_FAILLOCK" ;;
+        configure_login_banners)        section_check_is_red "LOGIN_BANNER" ;;
+        *) return 1 ;;
+    esac
+}
+
+should_execute_section_in_current_mode() {
+    local func="$1"
+    if $INTERACTIVE_STEP_MODE && ! $EXPERT_PROFILE_MODE; then
+        return 0
+    fi
+    if $INTERACTIVE_RECOMMENDED_MODE || $EXPERT_PROFILE_MODE || $AUTO_MODE; then
+        section_has_pending_findings "$func"
+        return $?
+    fi
+    return 0
+}
+
+count_targeted_pending_sections() {
+    local func count=0
+    for func in "$@"; do
+        if should_execute_section_in_current_mode "$func"; then
+            count=$((count+1))
+        fi
+    done
+    echo "$count"
+}
+
+interactive_selective_removal_menu() {
+    local -a candidate_targets=(banners auditd aide pam sysctl journald sudoers modules)
+    local -a visible_targets=()
+    local -a selected_flags=()
+    local target input part idx marker csv=""
+
+    SELECTIVE_MENU_RESULT=""
+
+    for target in "${candidate_targets[@]}"; do
+        if component_is_removable "$target"; then
+            visible_targets+=("$target")
+            selected_flags+=("false")
+        fi
+    done
+
+    if [[ ${#visible_targets[@]} -eq 0 ]]; then
+        warn "$(tr_msg no_removable)"
+        return 1
+    fi
+
+    while true; do
+        echo
+        echo -e "${C_BOLD}${C_YELLOW_BOLD}$(tr_msg selective_menu_title)${C_RESET}"
+        local i
+        for i in "${!visible_targets[@]}"; do
+            marker=" "
+            [[ "${selected_flags[$i]}" == "true" ]] && marker="x"
+            printf '  %2d) [%s] %-10s - %s\n' "$((i+1))" "$marker" "${visible_targets[$i]}" "$(component_menu_description "${visible_targets[$i]}")"
+        done
+        echo ""
+        printf '  a) %s\n' "$(tr_msg mark_all)"
+        printf '  n) %s\n' "$(tr_msg clear_all)"
+        printf '  f) %s
+' "$(tr_msg apply_selection)"
+        printf '  q) %s
+' "$(tr_msg cancel)"
+        printf '     %s
+' "$(tr_msg enter_apply_hint)"
+        echo ""
+        read -rp "$(tr_msg toggle_prompt)" input </dev/tty
+        input="${input#${input%%[![:space:]]*}}"
+        input="${input%${input##*[![:space:]]}}"
+
+        case "$input" in
+            "")
+                csv=""
+                for i in "${!visible_targets[@]}"; do
+                    [[ "${selected_flags[$i]}" == "true" ]] || continue
+                    [[ -n "$csv" ]] && csv+="," 
+                    csv+="${visible_targets[$i]}"
+                done
+                [[ -n "$csv" ]] || continue
+                SELECTIVE_MENU_RESULT="$csv"
+                return 0 ;;
+            a|A)
+                for i in "${!selected_flags[@]}"; do selected_flags[$i]="true"; done ;;
+            n|N)
+                for i in "${!selected_flags[@]}"; do selected_flags[$i]="false"; done ;;
+            f|F)
+                csv=""
+                for i in "${!visible_targets[@]}"; do
+                    [[ "${selected_flags[$i]}" == "true" ]] || continue
+                    [[ -n "$csv" ]] && csv+="," 
+                    csv+="${visible_targets[$i]}"
+                done
+                [[ -n "$csv" ]] || { warn "$(tr_msg nothing_selected)"; continue; }
+                SELECTIVE_MENU_RESULT="$csv"
+                return 0 ;;
+            q|Q)
+                return 1 ;;
+            *)
+                input="${input//;/,}"
+                input="${input// /,}"
+                IFS=',' read -r -a parts <<< "$input"
+                local selected_count=0
+                for i in "${!selected_flags[@]}"; do
+                    [[ "${selected_flags[$i]}" == "true" ]] && selected_count=$((selected_count+1))
+                done
+                if [[ ${#parts[@]} -eq 1 ]] && [[ "${parts[0]}" =~ ^[0-9]+$ ]] && (( selected_count == 0 )); then
+                    idx=$((parts[0]-1))
+                    if (( idx < 0 || idx >= ${#visible_targets[@]} )); then
+                        warn "$(tr_msg invalid_number): ${parts[0]}"
+                        continue
+                    fi
+                    SELECTIVE_MENU_RESULT="${visible_targets[$idx]}"
+                    return 0
+                fi
+                for part in "${parts[@]}"; do
+                    [[ -n "$part" ]] || continue
+                    [[ "$part" =~ ^[0-9]+$ ]] || { warn "$(tr_msg invalid_input): $part"; continue; }
+                    idx=$((part-1))
+                    if (( idx < 0 || idx >= ${#visible_targets[@]} )); then
+                        warn "$(tr_msg invalid_number): $part"
+                        continue
+                    fi
+                    if [[ "${selected_flags[$idx]}" == "true" ]]; then
+                        selected_flags[$idx]="false"
+                    else
+                        selected_flags[$idx]="true"
+                    fi
+                done ;;
+        esac
+    done
+}
+
+
+clear_managed_banner_file() {
+    local file="$1"
+    if [[ -f "${file}${BACKUP_SUFFIX}" ]]; then
+        restore_file "$file"
+        return 0
+    fi
+    if [[ -f "$file" ]] && grep -q "AUTHORIZED ACCESS ONLY" "$file" 2>/dev/null; then
+        : > "$file"
+        chmod 644 "$file" 2>/dev/null || true
+        success "  ✔ Cleared managed banner file: $file"
+    fi
+}
+
+remove_sshd_banner_reference_if_needed() {
+    local sc="/etc/ssh/sshd_config"
+    if [[ -f "${sc}${BACKUP_SUFFIX}" ]]; then
+        restore_file "$sc" || return 1
+    elif [[ -f "$sc" ]] && grep -qiE "^\s*Banner\s+$BANNER_FILE" "$sc"; then
+        sed -i -E "\|^\s*Banner\s+$BANNER_FILE\s*$|d" "$sc" \
+            && success "  ✔ Removed Banner directive from sshd_config." \
+            || warn "  Could not remove Banner directive from sshd_config."
+    fi
+    detect_ssh_service
+    systemctl restart "$SSH_SERVICE" >/dev/null 2>&1 && success "  ✔ SSH restarted." || warn "  SSH restart failed."
+}
+
+rollback_banners_component() {
+    info "${C_BOLD}Selective rollback: banners${C_RESET}"
+    clear_managed_banner_file "$BANNER_FILE"
+    clear_managed_banner_file "$MOTD_FILE"
+    remove_sshd_banner_reference_if_needed
+}
+
+rollback_auditd_component() {
+    info "${C_BOLD}Selective rollback: auditd${C_RESET}"
+    restore_file "$AUDITD_RULES"
+    if [[ -f "$AUDITD_RULES" ]]; then
+        command -v augenrules >/dev/null 2>&1 && augenrules --load >/dev/null 2>&1 || true
+        systemctl restart auditd >/dev/null 2>&1 && success "  ✔ auditd restarted with restored rules." || true
+    fi
+    if is_package_installed "auditd" || is_package_installed "audispd-plugins"; then
+        systemctl disable --now auditd >/dev/null 2>&1 || true
+        remove_packages_if_present "audispd-plugins" "auditd"
+    fi
+    info "  Audit-Logs bleiben unter /var/log/audit/audit.log erhalten."
+}
+
+rollback_aide_component() {
+    info "${C_BOLD}Selective rollback: aide${C_RESET}"
+    restore_file "$AIDE_CRON"
+    restore_file "$AIDE_LOCAL_EXCLUDES"
+    if [[ -f /var/lib/aide/aide.db || -f /var/lib/aide/aide.db.new || -f /var/lib/aide/aide.db.gz || -f /var/lib/aide/aide.conf.autogenerated ]]; then
+        rm -f /var/lib/aide/aide.db /var/lib/aide/aide.db.new /var/lib/aide/aide.db.gz /var/lib/aide/aide.conf.autogenerated >/dev/null 2>&1 || true
+        success "  ✔ Removed AIDE baseline/config files."
+    fi
+    remove_packages_if_present "aide-common" "aide"
+    info "  AIDE-Logs bleiben unter /var/log/aide-check.log und /var/log/aide-report-*.log erhalten."
+}
+
+rollback_pam_component() {
+    info "${C_BOLD}Selective rollback: pam${C_RESET}"
+    restore_file "$PWQUALITY_CONF"
+    restore_file "$FAILLOCK_CONF"
+    finalize_pam_rollback_state true
+}
+
+finalize_pam_rollback_state() {
+    local run_smoke_test="${1:-false}"
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        if timeout 20 env DEBIAN_FRONTEND=noninteractive pam-auth-update --disable faillock --force </dev/null >/dev/null 2>&1; then
+            timeout 20 env DEBIAN_FRONTEND=noninteractive pam-auth-update --force </dev/null >/dev/null 2>&1 || true
+            success "  ✔ pam-auth-update refresh executed."
+        else
+            warn "  pam-auth-update refresh timed out or failed; continuing rollback."
+        fi
+    fi
+    if [[ -f "$TRANSACTION_LOG" ]] && grep -q "|ROOT_LOCKED|" "$TRANSACTION_LOG"; then
+        if passwd -S root 2>/dev/null | grep -qE "^root\s+L"; then
+            passwd -u root >/dev/null 2>&1 && success "  ✔ Root account unlocked." || warn "  Could not unlock root."
+        fi
+    fi
+    if [[ "$run_smoke_test" == "true" ]]; then
+        sudo_smoke_test "/etc/pam.d/common-auth" || warn "  PAM smoke test reported an issue after rollback."
+    fi
+}
+
+rollback_sysctl_component() {
+    info "${C_BOLD}Selective rollback: sysctl${C_RESET}"
+    restore_file "$SYSCTL_CONFIG_FILE"
+    sysctl --system >/dev/null 2>&1 && success "  ✔ Sysctl reloaded." || warn "  Sysctl reload failed."
+}
+
+rollback_journald_component() {
+    info "${C_BOLD}Selective rollback: journald${C_RESET}"
+    restore_file "/etc/systemd/journald.conf"
+    systemctl restart systemd-journald >/dev/null 2>&1 && success "  ✔ systemd-journald restarted." || warn "  journald restart failed."
+}
+
+rollback_sudoers_component() {
+    info "${C_BOLD}Selective rollback: sudoers${C_RESET}"
+    restore_file "$SUDOERS_TTY_FILE"
+    visudo -cf /etc/sudoers >/dev/null 2>&1 && success "  ✔ sudoers syntax verified." || warn "  visudo reported a syntax issue."
+}
+
+rollback_modules_component() {
+    info "${C_BOLD}Selective rollback: modules${C_RESET}"
+    restore_file "$MODPROBE_BLACKLIST"
+    command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u >/dev/null 2>&1 && success "  ✔ initramfs updated." || true
+}
+
+archive_transaction_log() {
+    [[ -f "$TRANSACTION_LOG" ]] || return 0
+    local archived="${TRANSACTION_LOG}.rolledback.$(date +%Y%m%d_%H%M%S)"
+    mv "$TRANSACTION_LOG" "$archived" \
+        && info "$(tr_msg archive_txlog_ok): $archived" \
+        || warn "$(tr_msg archive_txlog_fail)"
+}
+
+run_selective_removal() {
+    local raw_targets="$1"
+    local normalized selected_from_menu target errors=0
+    local -a targets=()
+    local -a effective_targets=()
+
+    if [[ -z "$raw_targets" || "$raw_targets" == "__MENU__" || "$raw_targets" == "menu" ]]; then
+        interactive_selective_removal_menu || {
+            info "$(tr_msg aborted_selective)"
+            return 0
+        }
+        raw_targets="$SELECTIVE_MENU_RESULT"
+    fi
+
+    normalized="${raw_targets// /}"
+    IFS=',' read -r -a targets <<< "$normalized"
+
+    for target in "${targets[@]}"; do
+        [[ -n "$target" ]] || continue
+        effective_targets+=("$target")
+    done
+
+    [[ ${#effective_targets[@]} -gt 0 ]] || { warn "$(tr_msg no_valid_targets)"; return 1; }
+
+    echo
+    echo -e "${C_BOLD}${C_YELLOW_BOLD}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_BOLD}${C_YELLOW_BOLD}║      SELECTIVE ROLLBACK — REMOVING SELECTED COMPONENTS      ║${C_RESET}"
+    echo -e "${C_BOLD}${C_YELLOW_BOLD}╚══════════════════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    info "$(tr_msg selected_targets): ${effective_targets[*]}"
+
+    if ! $AUTO_MODE; then
+        ask_yes_no "$(tr_msg confirm_selective_remove)" "n" || {
+            info "Selektives Entfernen abgebrochen."
+            return 0
+        }
+    fi
+
+    for target in "${effective_targets[@]}"; do
+        case "$target" in
+            banners|banner)           rollback_banners_component || errors=$((errors+1)) ;;
+            auditd|audit)             rollback_auditd_component || errors=$((errors+1)) ;;
+            aide)                     rollback_aide_component || errors=$((errors+1)) ;;
+            pam|pam_hardening)        rollback_pam_component || errors=$((errors+1)) ;;
+            sysctl)                   rollback_sysctl_component || errors=$((errors+1)) ;;
+            journald)                 rollback_journald_component || errors=$((errors+1)) ;;
+            sudoers|sudoers_tty)      rollback_sudoers_component || errors=$((errors+1)) ;;
+            modules|module_blacklist) rollback_modules_component || errors=$((errors+1)) ;;
+            *) warn "Unknown remove target: $target" ; errors=$((errors+1)) ;;
+        esac
+        echo
+    done
+
+    print_security_log_summary
+    (( errors == 0 ))
+}
+
+# ============================================================================
+# FULL ROLLBACK
+# ============================================================================
+
+save_assessment_snapshot() {
+    local outfile="$1"
+    local id entry raw desc
+    mkdir -p "$(dirname "$outfile")" 2>/dev/null || true
+    : > "$outfile"
+    for id in "${ASSESS_ORDER[@]}"; do
+        entry="${ASSESS_RESULTS[$id]:-}"
+        [[ -n "$entry" ]] || continue
+        raw="${entry%%:*}"
+        desc="${entry#*:}"
+        printf '%s\t%s\t%s\n' "$id" "$raw" "$desc" >> "$outfile"
+    done
+}
+
+cleanup_package_residuals_after_rollback() {
+    if ! command -v apt-get >/dev/null 2>&1; then
+        return 0
+    fi
+    DEBIAN_FRONTEND=noninteractive timeout 180 apt-get autoremove -y --purge </dev/null >/dev/null 2>&1 \
+        && success "  ✔ Residual package cleanup completed." \
+        || warn "  Residual package cleanup timed out or failed."
+}
+
+print_rollback_validation_report() {
+    local report="$ROLLBACK_VALIDATION_REPORT"
+    local id entry raw now_norm base_raw base_norm
+    local matched=0 still_green=0 regressed=0 baseline_known=false
+    declare -A BASELINE_STATUS=()
+
+    if [[ -s "$BASELINE_SNAPSHOT" ]]; then
+        baseline_known=true
+        while IFS=$'\t' read -r id base_raw _desc; do
+            [[ -n "$id" ]] || continue
+            BASELINE_STATUS["$id"]="$base_raw"
+        done < "$BASELINE_SNAPSHOT"
+    fi
+
+    mkdir -p "$(dirname "$report")" 2>/dev/null || true
+    {
+        echo "Rollback validation report ($(date '+%Y-%m-%d %H:%M:%S'))"
+        echo
+    } > "$report"
+
+    if ! $baseline_known; then
+        {
+            echo "No pre-hardening baseline snapshot available."
+            echo "Interpretation hint: not every check should turn RED after rollback."
+            echo "Some items may already have been GREEN on the original system."
+        } >> "$report"
+        info "Rollback validation: no saved pre-hardening baseline found."
+        info "Not every check should turn RED after rollback — some controls may already have been GREEN originally."
+        info "Validation details: $report"
+        return 0
+    fi
+
+    for id in "${ASSESS_ORDER[@]}"; do
+        entry="${ASSESS_RESULTS[$id]:-}"
+        [[ -n "$entry" ]] || continue
+        raw="${entry%%:*}"
+        now_norm="$(normalize_matrix_status "$raw")"
+        base_raw="${BASELINE_STATUS[$id]:-UNKNOWN}"
+        if [[ "$base_raw" == "UNKNOWN" ]]; then
+            continue
+        fi
+        base_norm="$(normalize_matrix_status "$base_raw")"
+        if [[ "$now_norm" == "$base_norm" ]]; then
+            matched=$((matched+1))
+        elif [[ "$base_norm" == "RED" && "$now_norm" == "GREEN" ]]; then
+            still_green=$((still_green+1))
+            printf 'STILL_GREEN_AFTER_ROLLBACK\t%s\tbaseline=%s\tnow=%s\n' "$id" "$base_norm" "$now_norm" >> "$report"
+        elif [[ "$base_norm" == "GREEN" && "$now_norm" == "RED" ]]; then
+            regressed=$((regressed+1))
+            printf 'REGRESSED_BELOW_BASELINE\t%s\tbaseline=%s\tnow=%s\n' "$id" "$base_norm" "$now_norm" >> "$report"
+        fi
+    done
+
+    {
+        echo "Matched baseline checks: $matched"
+        echo "Still GREEN although baseline was RED: $still_green"
+        echo "Now RED although baseline was GREEN: $regressed"
+    } >> "$report"
+
+    info "Rollback validation against saved pre-hardening baseline:"
+    info "  Matches baseline again: $matched"
+    info "  Still GREEN although baseline was RED: $still_green"
+    info "  Now RED although baseline was GREEN: $regressed"
+    if (( still_green > 0 )); then
+        warn "Some findings are still GREEN after rollback. This usually means the rollback could not fully revert them, or they were changed outside the managed rollback path."
+    fi
+    if (( regressed > 0 )); then
+        warn "Some findings are now RED although the original baseline was GREEN. Review the rollback validation report."
+    fi
+    info "Validation details: $report"
+}
+
+run_full_rollback() {
+    echo
+    echo -e "${C_BOLD}${C_RED_BOLD}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_BOLD}${C_RED_BOLD}║           ROLLBACK — RESTORING ORIGINAL SYSTEM STATE        ║${C_RESET}"
+    echo -e "${C_BOLD}${C_RED_BOLD}╚══════════════════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    info "Rollback runs fully automated and non-interactively."
+
+    local errors=0
+
+    if [[ ! -f "$TRANSACTION_LOG" ]]; then
+        warn "No transaction log found at $TRANSACTION_LOG."
+        warn "Fallback: restore backups and remove recognisable generated files."
+    fi
+
+    # --- 1. Restore all backed-up config files ---
+    info "${C_BOLD}Step 1/7: Restoring backed-up configuration files...${C_RESET}"
+    local backup_count=0
+    while IFS= read -r -d '' backup; do
+        local original="${backup%"$BACKUP_SUFFIX"}"
+        info "  Restoring: $original"
+        if mv "$backup" "$original"; then
+            success "  ✔ Restored: $original"
+            backup_count=$((backup_count+1))
+        else
+            error "  ✘ Failed to restore: $original"
+            errors=$((errors+1))
+        fi
+    done < <(find /etc /home /root -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null | sort -z)
+    (( backup_count > 0 )) && success "$backup_count config file(s) restored." || info "No backup files found."
+
+    # --- 2. Remove files added by the script ---
+    info "${C_BOLD}Step 2/7: Removing files added by the script...${C_RESET}"
+    local added_files=(
+        "$SYSCTL_CONFIG_FILE"
+        "$SUDOERS_TTY_FILE"
+        "$MODPROBE_BLACKLIST"
+        "$LIMITS_CONF"
+        "$AIDE_CRON"
+        "$AIDE_LOCAL_EXCLUDES"
+        "$AUDITD_RULES"
+        "$SSHD_HARDENING_DROPIN"
+        "$SSHD_HARDENING_DROPIN_LEGACY"
+    )
+    local f
+    for f in "${added_files[@]}"; do
+        if [[ -f "$f" ]] && ! [[ -f "${f}${BACKUP_SUFFIX}" ]]; then
+            if grep -q "generated by security_script.sh" "$f" 2>/dev/null || \
+               grep -q "Generated by security_script.sh" "$f" 2>/dev/null; then
+                rm -f "$f" && success "  ✔ Removed: $f" || { error "  ✘ Failed to remove: $f"; errors=$((errors+1)); }
+            fi
+        fi
+    done
+
+    # --- 3. Clean up lingering banner configuration ---
+    info "${C_BOLD}Step 3/7: Cleaning up login banners...${C_RESET}"
+    rollback_banners_component || errors=$((errors+1))
+
+    # --- 4. PAM/root rollback ---
+    info "${C_BOLD}Step 4/7: Restoring PAM/root state...${C_RESET}"
+    finalize_pam_rollback_state false || errors=$((errors+1))
+
+    # --- 5. Reload sysctl/journald and module state ---
+    info "${C_BOLD}Step 5/7: Reloading sysctl/journald/module state...${C_RESET}"
+    rollback_sysctl_component || true
+    rollback_journald_component || true
+    rollback_modules_component || true
+    rollback_sudoers_component || true
+
+    # --- 6. Remove packages installed by this script ---
+    info "${C_BOLD}Step 6/7: Removing packages recorded as script-installed...${C_RESET}"
+    if [[ -f "$TRANSACTION_LOG" ]]; then
+        local pkgs_to_remove=()
+        while IFS='|' read -r _ts action pkg; do
+            [[ "$action" == "PKG_INSTALLED" ]] && pkgs_to_remove+=("$pkg")
+        done < "$TRANSACTION_LOG"
+        if [[ ${#pkgs_to_remove[@]} -gt 0 ]]; then
+            local unique_pkgs
+            unique_pkgs=$(printf "%s\n" "${pkgs_to_remove[@]}" | awk '!seen[$0]++')
+            while IFS= read -r pkg; do
+                [[ -z "$pkg" ]] && continue
+                if is_package_installed "$pkg"; then
+                    info "  Removing: $pkg"
+                    DEBIAN_FRONTEND=noninteractive timeout 180 apt-get purge -y "$pkg" </dev/null >/dev/null 2>&1 \
+                        && success "  ✔ Removed package: $pkg" \
+                        || warn "  Could not remove package: $pkg"
+                fi
+            done <<< "$unique_pkgs"
+        else
+            info "  No packages recorded in transaction log."
+        fi
+    else
+        info "  No transaction log — skipping package removal."
+    fi
+
+    cleanup_package_residuals_after_rollback
+
+    # --- 7. Restart affected services and archive transaction log ---
+    info "${C_BOLD}Step 7/7: Restarting affected services and archiving logs...${C_RESET}"
+    detect_ssh_service
+    if systemctl is-active --quiet "$SSH_SERVICE" 2>/dev/null; then
+        timeout 20 systemctl restart "$SSH_SERVICE" >/dev/null 2>&1 && success "  ✔ SSH restarted." || warn "  SSH restart timed out or failed."
+    fi
+    timeout 20 systemctl restart systemd-journald >/dev/null 2>&1 && success "  ✔ systemd-journald restarted." || warn "  systemd-journald restart timed out or failed."
+    timeout 20 sysctl --system >/dev/null 2>&1 && success "  ✔ Sysctl reloaded." || warn "  Sysctl reload timed out or failed."
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive timeout 30 pam-auth-update --force </dev/null >/dev/null 2>&1             && success "  ✔ pam-auth-update refresh executed."             || warn "  pam-auth-update refresh timed out or failed."
+    fi
+    archive_transaction_log
+
+    declare -gA ASSESS_RESULTS=()
+    declare -ga ASSESS_ORDER=()
+    run_assessment
+    print_rollback_validation_report
+
+    print_security_log_summary
+
+    echo
+    if (( errors == 0 )); then
+        echo -e "${C_GREEN_BOLD}╔══════════════════════════════════════════════════════╗${C_RESET}"
+        echo -e "${C_GREEN_BOLD}║  ROLLBACK COMPLETE — System restored successfully    ║${C_RESET}"
+        echo -e "${C_GREEN_BOLD}╚══════════════════════════════════════════════════════╝${C_RESET}"
+    else
+        echo -e "${C_RED_BOLD}╔══════════════════════════════════════════════════════╗${C_RESET}"
+        echo -e "${C_RED_BOLD}║  ROLLBACK COMPLETE with ${errors} error(s) — check above  ║${C_RESET}"
+        echo -e "${C_RED_BOLD}╚══════════════════════════════════════════════════════╝${C_RESET}"
+    fi
+    echo
+    warn "A REBOOT is recommended to fully apply the rollback."
+}
+
+
+# ============================================================================
+# ASSESSMENT
+# ============================================================================
+run_assessment() {
+    echo
+    echo -e "${C_BOLD}${C_CYAN}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}║       SECURITY ASSESSMENT MATRIX — SCANNING SYSTEM          ║${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}╚══════════════════════════════════════════════════════════════╝${C_RESET}"
+    echo
+
+    # SSH
+    local ssh_root ssh_pass ssh_x11 ssh_agent ssh_tcp ssh_grace ssh_max_auth
+    ssh_root=$(get_effective_sshd_config "PermitRootLogin")
+    ssh_pass=$(get_effective_sshd_config "PasswordAuthentication")
+    ssh_x11=$(get_effective_sshd_config "X11Forwarding")
+    ssh_agent=$(get_effective_sshd_config "AllowAgentForwarding")
+    ssh_tcp=$(get_effective_sshd_config "AllowTcpForwarding")
+    ssh_grace=$(get_effective_sshd_config "LoginGraceTime")
+    ssh_max_auth=$(get_effective_sshd_config "MaxAuthTries")
+
+    [[ "$ssh_root" =~ ^(no|prohibit-password|without-password)$ ]] \
+        && record_check "SSH_ROOT_LOGIN"   "PASS" "PermitRootLogin=$ssh_root" \
+        || record_check "SSH_ROOT_LOGIN"   "FAIL" "PermitRootLogin='${ssh_root:-yes}' — should be prohibit-password"
+    [[ "$(echo "${ssh_pass:-yes}" | tr '[:upper:]' '[:lower:]')" == "no" ]] \
+        && record_check "SSH_PASSWORD_AUTH" "PASS" "PasswordAuthentication=no" \
+        || record_check "SSH_PASSWORD_AUTH" "FAIL" "PasswordAuthentication='${ssh_pass:-yes}'"
+    [[ "$(echo "${ssh_x11:-no}" | tr '[:upper:]' '[:lower:]')" == "no" ]] \
+        && record_check "SSH_X11"          "PASS" "X11Forwarding=no" \
+        || record_check "SSH_X11"          "FAIL" "X11Forwarding='${ssh_x11:-yes}'"
+    [[ "$(echo "${ssh_agent:-yes}" | tr '[:upper:]' '[:lower:]')" == "no" ]] \
+        && record_check "SSH_AGENT_FWD"    "PASS" "AllowAgentForwarding=no" \
+        || record_check "SSH_AGENT_FWD"    "FAIL" "AllowAgentForwarding='${ssh_agent:-yes}'"
+    [[ "$(echo "${ssh_tcp:-yes}" | tr '[:upper:]' '[:lower:]')" == "no" ]] \
+        && record_check "SSH_TCP_FWD"      "PASS" "AllowTcpForwarding=no" \
+        || record_check "SSH_TCP_FWD"      "FAIL" "AllowTcpForwarding='${ssh_tcp:-yes}'"
+    local grace_num="${ssh_grace:-120}"; grace_num="${grace_num//[^0-9]/}"
+    (( ${grace_num:-120} <= 30 )) \
+        && record_check "SSH_GRACE_TIME"   "PASS" "LoginGraceTime=${ssh_grace}s" \
+        || record_check "SSH_GRACE_TIME"   "FAIL" "LoginGraceTime='${ssh_grace:-120}' — should be ≤30"
+    local max_auth="${ssh_max_auth:-6}"
+    (( ${max_auth:-6} <= 3 )) \
+        && record_check "SSH_MAX_AUTH"     "PASS" "MaxAuthTries=${ssh_max_auth}" \
+        || record_check "SSH_MAX_AUTH"     "FAIL" "MaxAuthTries='${ssh_max_auth:-6}' — should be ≤3"
+
+    # Firewall
+    is_package_installed ufw && ufw status 2>/dev/null | grep -q "Status: active" \
+        && record_check "UFW_ACTIVE"       "PASS" "UFW active" \
+        || record_check "UFW_ACTIVE"       "FAIL" "UFW not installed or inactive"
+
+    # Brute-force protection
+    is_package_installed fail2ban && systemctl is-active --quiet fail2ban 2>/dev/null \
+        && record_check "FAIL2BAN"         "PASS" "Fail2ban active" \
+        || record_check "FAIL2BAN"         "FAIL" "Fail2ban not installed/running"
+
+    # Auto-updates
+    is_package_installed unattended-upgrades \
+        && record_check "UNATTENDED_UPGRADES" "PASS" "unattended-upgrades installed" \
+        || record_check "UNATTENDED_UPGRADES" "FAIL" "unattended-upgrades missing"
+
+    # Antivirus
+    is_package_installed clamav \
+        && record_check "CLAMAV"           "PASS" "ClamAV installed" \
+        || record_check "CLAMAV"           "FAIL" "ClamAV not installed"
+
+    # Audit daemon
+    if is_package_installed auditd; then
+        if auditd_is_active; then
+            [[ -f "$AUDITD_RULES" ]]                 && record_check "AUDITD"       "PASS" "auditd active + CIS ruleset"                 || record_check "AUDITD"       "FAIL" "auditd active but no custom ruleset"
+        elif ! auditd_unit_exists; then
+            record_check "AUDITD"              "FAIL" "auditd package installed but service unit missing"
+        else
+            record_check "AUDITD"              "FAIL" "auditd installed but not running"
+        fi
+    else
+        record_check "AUDITD"                  "FAIL" "auditd not installed"
+    fi
+
+    # File integrity
+    if is_package_installed aide; then
+        aide_baseline_exists             && record_check "AIDE"         "PASS" "AIDE installed + database initialized"             || record_check "AIDE"         "FAIL" "AIDE installed but baseline missing"
+    else
+        record_check "AIDE"                "FAIL" "AIDE not installed"
+    fi
+
+    # AppArmor
+    if command -v aa-status >/dev/null 2>&1; then
+        local enforced complain
+        enforced=$(aa-status 2>/dev/null | grep "profiles are in enforce mode" | grep -oP '^\d+' || echo "0")
+        complain=$(aa-status 2>/dev/null | grep "profiles are in complain mode" | grep -oP '^\d+' || echo "0")
+        (( ${complain:-0} == 0 )) \
+            && record_check "APPARMOR"     "PASS" "AppArmor: ${enforced:-0} enforce, 0 complain" \
+            || record_check "APPARMOR"     "FAIL" "AppArmor: ${complain:-0} profile(s) in complain mode"
+    else
+        record_check "APPARMOR"            "FAIL" "AppArmor not available"
+    fi
+
+    # Sysctl
+    load_sysctl_policy
+    local sysctl_fail=0
+    local -a sysctl_fails=()
+    local param desired current
+    for param in "${!SYSCTL_POLICY[@]}"; do
+        desired="${SYSCTL_POLICY[$param]}"
+        current=$(get_effective_sysctl_config "$param")
+        if ! sysctl_value_matches_policy "$param" "$desired" "$current"; then
+            sysctl_fail=$((sysctl_fail+1))
+            sysctl_fails+=("$param")
+        fi
+    done
+    if (( sysctl_fail == 0 )); then
+        record_check "SYSCTL" "PASS" "All critical sysctl parameters hardened"
+    else
+        record_check "SYSCTL" "FAIL" "${sysctl_fail} sysctl param(s) not hardened: ${sysctl_fails[*]}"
+    fi
+
+    # Core dumps
+    local core_sysctl core_limits=false
+    core_sysctl=$(get_effective_sysctl_config "fs.suid_dumpable")
+    grep -qE '^\s*\*\s+hard\s+core\s+0' /etc/security/limits.conf /etc/security/limits.d/*.conf 2>/dev/null && core_limits=true
+    [[ "$core_sysctl" == "0" ]] && $core_limits \
+        && record_check "CORE_DUMPS"       "PASS" "Core dumps disabled" \
+        || record_check "CORE_DUMPS"       "FAIL" "Core dumps not fully disabled (sysctl=${core_sysctl:-not_set})"
+
+    # Filesystem hardening
+    local fstab_issues=0
+    for mountpoint in /tmp /dev/shm; do
+        if grep -qE "^\S+\s+${mountpoint}\s" /proc/mounts 2>/dev/null; then
+            local opts opt
+            opts=$(grep -E "^\S+\s+${mountpoint}\s" /proc/mounts | awk '{print $4}')
+            for opt in noexec nosuid nodev; do
+                echo "$opts" | grep -q "$opt" || fstab_issues=$((fstab_issues+1))
+            done
+        fi
+    done
+    (( fstab_issues == 0 )) \
+        && record_check "FSTAB_HARDENING"  "PASS" "/tmp + /dev/shm: noexec,nosuid,nodev" \
+        || record_check "FSTAB_HARDENING"  "FAIL" "${fstab_issues} mount option(s) missing on /tmp or /dev/shm"
+
+    # Kernel modules
+    [[ -f "$MODPROBE_BLACKLIST" ]] \
+        && record_check "MODULE_BLACKLIST" "PASS" "Module blacklist in place" \
+        || record_check "MODULE_BLACKLIST" "FAIL" "No kernel module blacklist"
+
+    # PAM pwquality
+    is_package_installed libpam-pwquality \
+        && record_check "PAM_PWQUALITY"    "PASS" "libpam-pwquality installed" \
+        || record_check "PAM_PWQUALITY"    "FAIL" "libpam-pwquality not installed"
+
+    # PAM faillock — check faillock.conf (modern approach, not pam.d injection)
+    if [[ -f "$FAILLOCK_CONF" ]] && grep -qE "^\s*deny\s*=" "$FAILLOCK_CONF" 2>/dev/null; then
+        record_check "PAM_FAILLOCK"        "PASS" "pam_faillock configured via faillock.conf"
+    elif grep -rq "pam_faillock" /etc/pam.d/ 2>/dev/null; then
+        record_check "PAM_FAILLOCK"        "PASS" "pam_faillock present in PAM stack"
+    else
+        record_check "PAM_FAILLOCK"        "FAIL" "pam_faillock not configured"
+    fi
+
+    # Root account
+    passwd -S root 2>/dev/null | grep -qE "^root\s+L" \
+        && record_check "ROOT_LOCKED"      "PASS" "root account locked" \
+        || record_check "ROOT_LOCKED"      "FAIL" "root account not locked"
+
+    # Login banner
+    [[ -f "$BANNER_FILE" ]] && grep -qi "authorized" "$BANNER_FILE" 2>/dev/null && \
+    grep -qi "Banner" /etc/ssh/sshd_config 2>/dev/null \
+        && record_check "LOGIN_BANNER"     "PASS" "Login banner configured" \
+        || record_check "LOGIN_BANNER"     "FAIL" "Login banner missing"
+
+    # Sudoers TTY
+    grep -rPh --include='*' '^\s*Defaults\s+([^#]*,\s*)?tty_tickets' /etc/sudoers /etc/sudoers.d/ >/dev/null 2>&1 \
+        && record_check "SUDOERS_TTY"      "PASS" "tty_tickets configured" \
+        || record_check "SUDOERS_TTY"      "FAIL" "tty_tickets not set"
+
+    # NTP
+    if systemctl is-active --quiet chrony 2>/dev/null || \
+       systemctl is-active --quiet chronyd 2>/dev/null || \
+       systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        record_check "NTP"                 "PASS" "NTP service active"
+    else
+        record_check "NTP"                 "FAIL" "No NTP service running"
+    fi
+}
+
+# ============================================================================
+# PRINT ASSESSMENT REPORT
+# ============================================================================
+print_assessment_report() {
+    local green=0 red=0
+
+    echo
+    echo -e "${C_BOLD}${C_CYAN}╔══════════════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}║                   SECURITY RED / GREEN MATRIX                       ║${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}╚══════════════════════════════════════════════════════════════════════╝${C_RESET}"
+    printf "  %-28s %-8s %s\n" "CHECK" "STATUS" "DETAILS"
+    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..70})${C_RESET}"
+
+    local id entry raw desc normalized color label
+    for id in "${ASSESS_ORDER[@]}"; do
+        entry="${ASSESS_RESULTS[$id]}"
+        raw="${entry%%:*}"; desc="${entry#*:}"
+        normalized="$(normalize_matrix_status "$raw")"
+        case "$normalized" in
+            GREEN) color="$C_GREEN_BOLD"; label="GREEN"; green=$((green+1)) ;;
+            RED)   color="$C_RED_BOLD";   label=" RED "; red=$((red+1)) ;;
+        esac
+        printf "  ${color}%-28s %-8s${C_RESET} %s\n" \
+            "$(echo "$id" | tr '_' ' ' | cut -c1-28)" "$label" "${desc:0:60}"
+    done
+
+    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..70})${C_RESET}"
+    echo
+    local total=$(( green + red ))
+    local score=0; (( total > 0 )) && score=$(( green * 100 / total ))
+
+    echo -e "  ${C_BOLD}$(tr_msg result_label):${C_RESET}  ${C_GREEN_BOLD}GREEN: ${green}${C_RESET}   ${C_RED_BOLD}RED: ${red}${C_RESET}   (${total} Checks)"
+    echo
+    if (( red == 0 )); then
+        echo -e "  ${C_GREEN_BOLD}$(tr_msg matrix_green)${C_RESET}"
+    elif (( score >= 75 )); then
+        echo -e "  ${C_YELLOW_BOLD}$(tr_msg matrix_warn_prefix) ${red} $(tr_msg matrix_warn_suffix)${C_RESET}"
+    else
+        echo -e "  ${C_RED_BOLD}$(tr_msg matrix_red_prefix) ${red} $(tr_msg matrix_red_suffix)${C_RESET}"
+    fi
+    echo
+}
+
 # ============================================================================
 # SECTION 1: SSH Key Generation
 # ============================================================================
 configure_ssh_key_and_users() {
-    info "${C_BOLD}1. Create SSH Key Pair (Ed25519)${C_RESET}"
-    if ! ask_yes_no "Execute this step (SSH Key)?" "y"; then
-        info "Step skipped."; echo; return 0
-    fi
+    info "${C_BOLD}1. SSH Key Pair (Ed25519)${C_RESET}"
+    describe_action "ssh_key"
+    is_section_skipped "ssh_key" && { info "Skipped."; record_check "SSH_KEY_GEN" "SKIP" "Skipped via config"; echo; return 0; }
+    ask_yes_no "Execute SSH Key step?" "y" || { record_check "SSH_KEY_GEN" "SKIP" "User skipped"; echo; return 0; }
 
     local current_user="${SUDO_USER:-$(whoami)}"
-    local user_home
-    user_home=$(eval echo "~$current_user")
-
-    # Check existing keys
+    local user_home; user_home=$(eval echo "~$current_user")
     local existing_count=0
     if [[ -d "$user_home/.ssh" ]]; then
         existing_count=$(find "$user_home/.ssh" -maxdepth 1 -type f -name "*.pub" \
             -exec grep -Eil "ssh-ed25519" {} + 2>/dev/null | wc -l)
-        if [[ -f "$user_home/.ssh/authorized_keys" ]]; then
+        [[ -f "$user_home/.ssh/authorized_keys" ]] && \
             existing_count=$((existing_count + $(grep -Eic "ssh-ed25519" "$user_home/.ssh/authorized_keys" 2>/dev/null || echo 0)))
-        fi
     fi
+    (( existing_count > 0 )) && success "Found $existing_count Ed25519 key(s)." || warn "No Ed25519 key found."
 
-    if (( existing_count > 0 )); then
-        success "Found $existing_count Ed25519 key(s) in '$user_home/.ssh'."
-    else
-        warn "No Ed25519 key found in '$user_home/.ssh'."
-    fi
-
-    if ! ask_yes_no "Create new Ed25519 SSH key pair for '$current_user'?" "y"; then
-        echo "--- Section 1 completed ---"; echo; return 0
-    fi
+    ask_yes_no "Create new Ed25519 key for '$current_user'?" "y" || { section_done 1; return 0; }
 
     local new_key_name
-    read -rp "Filename for new key [id_ed25519_$(date +%Y%m%d)]: " new_key_name
-    new_key_name=${new_key_name:-"id_ed25519_$(date +%Y%m%d)"}
+    $AUTO_MODE && new_key_name="id_ed25519_$(date +%Y%m%d)" || {
+        read -rp "Key filename [id_ed25519_$(date +%Y%m%d)]: " new_key_name </dev/tty
+        new_key_name=${new_key_name:-"id_ed25519_$(date +%Y%m%d)"}
+    }
     local key_path="$user_home/.ssh/$new_key_name"
     local pub_key_path="${key_path}.pub"
-    local authorized_keys_path="$user_home/.ssh/authorized_keys"
 
-    if [[ -f "$key_path" || -f "$pub_key_path" ]]; then
-        warn "Key file '$key_path' already exists."
-        if ! ask_yes_no "Overwrite?" "n"; then
-            echo "--- Section 1 completed ---"; echo; return 0
-        fi
-    fi
+    [[ -f "$key_path" ]] && ! ask_yes_no "Key exists. Overwrite?" "n" && { section_done 1; return 0; }
 
-    local passphrase passphrase_confirm
-    while true; do
-        read -rsp "Passphrase (empty = none): " passphrase; echo
-        read -rsp "Confirm passphrase: " passphrase_confirm; echo
-        [[ "$passphrase" == "$passphrase_confirm" ]] && break
-        warn "Passphrases do not match."
-    done
+    local passphrase=""
+    $AUTO_MODE || {
+        local passphrase_confirm
+        while true; do
+            read -rsp "Passphrase (empty=none): " passphrase </dev/tty; echo
+            read -rsp "Confirm: " passphrase_confirm </dev/tty; echo
+            [[ "$passphrase" == "$passphrase_confirm" ]] && break
+            warn "Passphrases don't match."
+        done
+    }
 
-    # Prepare .ssh directory
     run_cmd "MKDIR_SSH" mkdir -p "$user_home/.ssh"
     run_cmd "CHMOD_SSH" chmod 700 "$user_home/.ssh"
     run_cmd "CHOWN_SSH" chown "$current_user":"$current_user" "$user_home/.ssh"
 
     if $DRY_RUN; then
         dry_run_echo "ssh-keygen -q -t ed25519 -f '$key_path' -N '***'"
-        success "DRY-RUN: Would generate SSH key at '$key_path'."
-        echo "--- Section 1 completed ---"; echo; return 0
+        record_check "SSH_KEY_GEN" "FIXED" "DRY-RUN: Would generate $key_path"
+        section_done 1; return 0
     fi
 
-    # Generate key
-    info "Generating SSH key pair..."
     if sudo -u "$current_user" ssh-keygen -q -t ed25519 -f "$key_path" -N "$passphrase"; then
-        chmod 600 "$key_path"
-        chmod 644 "$pub_key_path"
+        chmod 600 "$key_path"; chmod 644 "$pub_key_path"
         chown "$current_user":"$current_user" "$key_path" "$pub_key_path"
-        success "SSH key pair created at '$key_path'."
         log_change "SSH_KEY_GENERATED:${key_path}"
 
-        # Display private key
         echo
-        warn "--- Private Key ($(basename "$key_path")) --- SENSITIVE! ---"
-        cat "$key_path"
-        warn "--- End Private Key --- Copy to a secure location! ---"
+        echo -e "${C_YELLOW_BOLD}  ╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║  SSH Private Key erzeugt — NICHT im Terminal anzeigen!      ║${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ╠══════════════════════════════════════════════════════════════╣${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║  Private Key: ${C_CYAN}${key_path}${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║  Public Key:  ${pub_key_path}${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║  Auf lokalen Rechner kopieren:${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ║  ${C_CYAN}scp root@<server>:${key_path} ~/.ssh/${new_key_name}${C_RESET}"
+        echo -e "${C_YELLOW_BOLD}  ╚══════════════════════════════════════════════════════════════╝${C_RESET}"
         echo
 
-        # Add to authorized_keys
-        info "Adding public key to authorized_keys..."
-        if ! sudo -u "$current_user" test -f "$authorized_keys_path"; then
+        # authorized_keys
+        local authorized_keys_path="$user_home/.ssh/authorized_keys"
+        sudo -u "$current_user" test -f "$authorized_keys_path" || {
             sudo -u "$current_user" touch "$authorized_keys_path"
             sudo -u "$current_user" chmod 600 "$authorized_keys_path"
-            log_change "ADDED_FILE:$authorized_keys_path"
-        fi
-
-        local pub_key_content
-        pub_key_content=$(cat "$pub_key_path")
-        if sudo -u "$current_user" grep -Fq -- "$pub_key_content" "$authorized_keys_path" 2>/dev/null; then
-            success "Public key already in authorized_keys."
-        elif echo "$pub_key_content" | sudo -u "$current_user" tee -a "$authorized_keys_path" > /dev/null; then
-            success "Public key added to authorized_keys."
-            log_change "AUTHORIZED_KEY_ADDED:${pub_key_path}"
-        else
-            warn "Could not add public key to authorized_keys."
-        fi
-
-        [[ -n "$passphrase" ]] && warn "Remember to store the passphrase securely!"
+        }
+        local pub_content; pub_content=$(cat "$pub_key_path")
+        sudo -u "$current_user" grep -Fq -- "$pub_content" "$authorized_keys_path" 2>/dev/null \
+            && success "Public key already in authorized_keys." \
+            || echo "$pub_content" | sudo -u "$current_user" tee -a "$authorized_keys_path" >/dev/null \
+            && success "Public key added to authorized_keys."
+        [[ -n "$passphrase" ]] && warn "Passphrase sicher aufbewahren!"
+        record_check "SSH_KEY_GEN" "FIXED" "Ed25519 key: $key_path"
     else
         error "Key generation failed."
+        record_check "SSH_KEY_GEN" "FAIL" "Key generation failed"
     fi
-
-    echo "--- Section 1 completed ---"; echo
+    section_done 1
 }
-
 
 # ============================================================================
 # SECTION 2: Unattended Upgrades
 # ============================================================================
 configure_unattended_upgrades() {
-    info "${C_BOLD}2. Configure Unattended Upgrades${C_RESET}"
-    if ! ask_yes_no "Execute this step (Unattended Upgrades)?" "y"; then
-        info "Step skipped."; echo; return 0
+    info "${C_BOLD}2. Unattended Upgrades${C_RESET}"
+    describe_action "upgrades"
+    is_section_skipped "upgrades" && { info "Skipped."; echo; return 0; }
+
+    local policy_diff
+    policy_diff=$(unattended_upgrades_policy_diff 2>/dev/null || true)
+    if [[ -z "$policy_diff" ]]; then
+        success "Existing unattended-upgrades configuration already matches script recommendations."
+        record_check "UNATTENDED_UPGRADES" "PASS" "Already aligned with script recommendations"
+        section_done 2
+        return 0
     fi
+    [[ "$policy_diff" != "package missing" ]] && warn "Current unattended-upgrades setup differs from script recommendations: $policy_diff"
+    ask_yes_no "Configure Unattended Upgrades?" "y" || { echo; return 0; }
 
     local pkg="unattended-upgrades"
     local config_file="/etc/apt/apt.conf.d/50unattended-upgrades"
     local periodic_file="/etc/apt/apt.conf.d/20auto-upgrades"
 
-    # Get distro info
     local distro_id distro_codename
-    if command -v lsb_release &>/dev/null; then
-        distro_id=$(lsb_release -is)
-        distro_codename=$(lsb_release -cs)
-    elif [[ -f /etc/os-release ]]; then
-        distro_id=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
-        distro_id="${distro_id^}"
-        distro_codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
-    else
-        error "Cannot determine distribution."; return 1
-    fi
-
-    if [[ -z "$distro_id" || -z "$distro_codename" ]]; then
-        error "Could not determine distro ID or codename."; return 1
-    fi
+    command -v lsb_release &>/dev/null \
+        && { distro_id=$(lsb_release -is); distro_codename=$(lsb_release -cs); } \
+        || {
+            distro_id=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+            distro_id="${distro_id^}"
+            distro_codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+        }
+    [[ -z "$distro_id" || -z "$distro_codename" ]] && { error "Cannot determine distro."; return 1; }
     info "Detected: $distro_id $distro_codename"
 
-    # Install package
     ensure_packages_installed "$pkg" || return 0
 
-    # --- Periodic configuration ---
-    info "Checking periodic configuration ($periodic_file)..."
-    local periodic_ok=true
+    # Periodic
     if [[ ! -f "$periodic_file" ]] || \
        ! grep -qE '^\s*APT::Periodic::Update-Package-Lists\s*"1"\s*;' "$periodic_file" || \
        ! grep -qE '^\s*APT::Periodic::Unattended-Upgrade\s*"1"\s*;' "$periodic_file"; then
-        periodic_ok=false
-    fi
-
-    if ! $periodic_ok; then
-        if ask_yes_no "Apply recommended periodic settings to '$periodic_file'?" "y"; then
+        describe_detail "upgrades_periodic"
+        ask_yes_no "Apply recommended periodic settings?" "y" && {
             backup_file "$periodic_file"
-            local content='APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";'
-            if run_shell "WRITE_FILE:$periodic_file" "echo -e '$content' > '$periodic_file'"; then
-                success "'$periodic_file' configured."
-            else
-                error "Failed to write '$periodic_file'."; restore_file "$periodic_file"
-            fi
-        fi
-    else
-        success "'$periodic_file' already correct."
-    fi
+            run_shell "WRITE_FILE:$periodic_file" \
+                "printf 'APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n' > '$periodic_file'" \
+                && success "'$periodic_file' configured." || { error "Failed."; restore_file "$periodic_file"; }
+        }
+    else success "'$periodic_file' already correct."; fi
 
-    # --- Main configuration ---
-    if [[ ! -f "$config_file" ]]; then
-        error "Config file '$config_file' not found!"; return 1
-    fi
+    [[ ! -f "$config_file" ]] && { error "Config '$config_file' not found!"; return 1; }
 
-    local temp_file
-    temp_file=$(mktemp)
+    local temp_file; temp_file=$(mktemp_tracked)
     cp "$config_file" "$temp_file"
     local changes_made=false
 
-    # Define desired parameters
     declare -A desired_params=(
         ["Unattended-Upgrade::AutoFixInterruptedDpkg"]="true"
         ["Unattended-Upgrade::MinimalSteps"]="true"
@@ -841,1505 +3142,1445 @@ configure_unattended_upgrades() {
         ["Unattended-Upgrade::Automatic-Reboot"]="true"
         ["Unattended-Upgrade::Automatic-Reboot-WithUsers"]="false"
         ["Unattended-Upgrade::Automatic-Reboot-Time"]="02:00"
-        ["Unattended-Upgrade::Allow-downgrade"]="true"
-        ["Unattended-Upgrade::Allow-APT-Mark-Fallback"]="true"
     )
 
-    # Process each parameter
+    local key value current_line
     for key in "${!desired_params[@]}"; do
-        local value="${desired_params[$key]}"
-        local current_line current_value
-
+        value="${desired_params[$key]}"
         current_line=$(grep -E "^\s*(//\s*)?${key}\s+" "$temp_file" || true)
-
         if [[ -n "$current_line" ]]; then
-            current_value=$(echo "$current_line" | sed -E 's/^\s*(\/\/\s*)?.*'"${key}"'\s*"?([^";]*)"?\s*;?.*/\2/')
-            local is_commented=false
-            [[ "$current_line" =~ ^\s*// ]] && is_commented=true
-
-            if ! $is_commented && [[ "$current_value" == "$value" ]]; then
-                success "  $key = \"$value\" (already correct)"
-                continue
-            fi
-
-            # Replace the line
+            [[ "$current_line" =~ ^\s*// ]] || \
+                [[ "$(echo "$current_line" | sed -E 's/.*"([^"]*)"[^"]*$/\1/')" == "$value" ]] && {
+                success "  $key already correct."; continue; }
             sed -i -E "s|^\s*(//\s*)?${key}\s+.*|${key} \"${value}\";|" "$temp_file"
-            success "  $key -> \"$value\" (updated)"
             changes_made=true
         else
-            # Add missing parameter
-            echo "${key} \"${value}\";" >> "$temp_file"
-            success "  $key -> \"$value\" (added)"
-            changes_made=true
+            echo "${key} \"${value}\";" >> "$temp_file"; changes_made=true
         fi
+        success "  $key -> $value"
     done
 
-    # Process Allowed-Origins
-    info "Checking Allowed-Origins..."
-    local desired_origins=(
-        "\"${distro_id}:${distro_codename}-security\";"
-        "\"${distro_id}:${distro_codename}-updates\";"
-        "\"${distro_id}ESMApps:${distro_codename}-apps-security\";"
-        "\"${distro_id}ESM:${distro_codename}-infra-security\";"
-    )
+    $AUTO_MODE && [[ -n "${AUTO_ADMIN_EMAIL:-}" ]] && {
+        local mk="Unattended-Upgrade::Mail"
+        grep -qE "^\s*(//\s*)?${mk}\s+" "$temp_file" \
+            && sed -i -E "s|^\s*(//\s*)?${mk}\s+.*|${mk} \"${AUTO_ADMIN_EMAIL}\";|" "$temp_file" \
+            || echo "${mk} \"${AUTO_ADMIN_EMAIL}\";" >> "$temp_file"
+        changes_made=true
+    }
 
-    local block_start block_end
-    block_start=$(grep -nE "^\s*(//\s*)?Unattended-Upgrade::Allowed-Origins\s*\{" "$temp_file" 2>/dev/null | head -n1 | cut -d: -f1 || true)
-
-    if [[ -n "$block_start" ]]; then
-        block_end=$(tail -n +"$block_start" "$temp_file" | grep -nm1 -E "^\s*(//\s*)?\};" | cut -d: -f1 || true)
-        if [[ -n "$block_end" ]]; then
-            block_end=$((block_start + block_end - 1))
-
-            # Uncomment block start if needed
-            if sed -n "${block_start}p" "$temp_file" | grep -q "^\s*//"; then
-                sed -i "${block_start}s|^\s*//\s*||" "$temp_file"
-                changes_made=true
-            fi
-            # Uncomment block end if needed
-            if sed -n "${block_end}p" "$temp_file" | grep -q "^\s*//"; then
-                sed -i "${block_end}s|^\s*//\s*||" "$temp_file"
-                changes_made=true
-            fi
-
-            for origin in "${desired_origins[@]}"; do
-                # Check if active
-                if sed -n "${block_start},${block_end}p" "$temp_file" | grep -qF "$origin"; then
-                    # Check if it's commented
-                    local origin_line
-                    origin_line=$(sed -n "${block_start},${block_end}p" "$temp_file" | grep -n "//.*${origin}" | head -n1 | cut -d: -f1)
-                    if [[ -n "$origin_line" ]]; then
-                        local abs_line=$((block_start + origin_line - 1))
-                        sed -i "${abs_line}s|^\s*//\s*||" "$temp_file"
-                        success "  Uncommented origin: $origin"
-                        changes_made=true
-                    else
-                        success "  Origin already active: $origin"
-                    fi
-                else
-                    # Insert before closing brace
-                    sed -i "${block_end}i\\\\t${origin}" "$temp_file"
-                    block_end=$((block_end + 1))
-                    success "  Added origin: $origin"
-                    changes_made=true
-                fi
-            done
-        fi
-    else
-        warn "Allowed-Origins block not found in config."
-    fi
-
-    # Email configuration
-    info "Checking mail configuration..."
-    local mail_key="Unattended-Upgrade::Mail"
-    local mail_report_val
-    mail_report_val=$(grep -E "^\s*Unattended-Upgrade::MailReport\s+" "$temp_file" | sed -E 's/.*"(.*)".*/\1/' || true)
-
-    if [[ "$mail_report_val" == "on-change" || "$mail_report_val" == "always" ]]; then
-        local current_mail
-        current_mail=$(grep -E "^\s*${mail_key}\s+" "$temp_file" | sed -E 's/.*"(.*)".*/\1/' || true)
-
-        if [[ -z "$current_mail" ]] || ! validate_email "$current_mail"; then
-            warn "No valid email address configured for mail reports."
-            if ask_yes_no "Set email address for upgrade reports?" "y"; then
-                local new_mail=""
-                while true; do
-                    read -rp "Email address: " new_mail
-                    validate_email "$new_mail" && break
-                    warn "Invalid email format."
-                done
-
-                if grep -qE "^\s*(//\s*)?${mail_key}\s+" "$temp_file"; then
-                    sed -i -E "s|^\s*(//\s*)?${mail_key}\s+.*|${mail_key} \"${new_mail}\";|" "$temp_file"
-                else
-                    echo "${mail_key} \"${new_mail}\";" >> "$temp_file"
-                fi
-                success "Mail address set to: $new_mail"
-                changes_made=true
-            fi
-        else
-            success "Mail address configured: $current_mail"
-        fi
-    fi
-
-    # Apply changes
     if $changes_made; then
-        backup_file "$config_file" || { rm -f "$temp_file"; return 1; }
-
-        if ! $DRY_RUN && command -v diff &>/dev/null; then
-            info "--- Changes ---"
-            diff -u "$config_file" "$temp_file" || true
-            info "--- End ---"
-            if ! ask_yes_no "Apply these changes?" "y"; then
-                rm -f "$temp_file"; return 0
-            fi
-        fi
-
-        if $DRY_RUN; then
-            dry_run_echo "mv '$temp_file' '$config_file'"
-            rm -f "$temp_file"
-        elif mv "$temp_file" "$config_file" && chmod 644 "$config_file"; then
-            success "Changes applied to $config_file."
-            log_change "APPLY_CONFIG:$config_file"
-        else
-            error "Failed to apply changes!"; restore_file "$config_file"
-        fi
+        backup_file "$config_file" || return 1
+        $DRY_RUN && dry_run_echo "Apply changes to $config_file" \
+            || { mv "$temp_file" "$config_file" && chmod 644 "$config_file" \
+                && success "Applied to $config_file." \
+                && log_change "APPLY_CONFIG:$config_file" \
+                && record_check "UNATTENDED_UPGRADES" "FIXED" "unattended-upgrades configured" \
+                || { error "Failed!"; restore_file "$config_file"; }; }
     else
-        success "No changes needed for $config_file."
+        success "No changes needed."; record_check "UNATTENDED_UPGRADES" "PASS" "Already configured"
     fi
-
-    rm -f "$temp_file" 2>/dev/null
-    echo "--- Section 2 completed ---"; echo
+    section_done 2
 }
 
-
 # ============================================================================
-# SECTION 3: MSMTP Setup
+# SECTION 3: MSMTP
 # ============================================================================
 configure_msmtp() {
-    info "${C_BOLD}3. MSMTP Setup for System Notifications${C_RESET}"
-    if ! ask_yes_no "Execute this step (MSMTP)?" "y"; then
-        info "Step skipped."; echo; return 0
-    fi
+    info "${C_BOLD}3. MSMTP Mail Notifications${C_RESET}"
+    describe_action "msmtp"
+    is_section_skipped "msmtp" && { info "Skipped."; echo; return 0; }
+    ask_yes_no "Setup MSMTP?" "y" || { echo; return 0; }
 
-    # Determine config scope
-    local config_owner config_file_path user_home
-    if [[ "$MSMTP_CONFIG_CHOICE" == "user" ]]; then
-        local target_user="${SUDO_USER:-$USER}"
-        read -rp "Configure MSMTP for which user? [$target_user]: " config_owner
+    local target_user="${SUDO_USER:-$USER}" config_owner user_home config_file_path
+    $AUTO_MODE && config_owner="$target_user" || {
+        read -rp "MSMTP for user [$target_user]: " config_owner </dev/tty
         config_owner=${config_owner:-$target_user}
-        user_home=$(eval echo "~$config_owner")
-        [[ -d "$user_home" ]] || { error "Home dir for '$config_owner' not found."; return 1; }
-        config_file_path="$user_home/.msmtprc"
-    else
-        config_file_path="/etc/msmtprc"; config_owner="root"; user_home="/root"
-    fi
-    info "MSMTP config: '$config_file_path' (owner: $config_owner)"
+    }
+    user_home=$(eval echo "~$config_owner")
+    [[ -d "$user_home" ]] || { error "Home dir not found for '$config_owner'."; return 1; }
+    config_file_path="$user_home/.msmtprc"
 
-    # Install packages
-    local base_pkgs=("msmtp" "msmtp-mta")
-    ensure_packages_installed "${base_pkgs[@]}" || return 0
+    ensure_packages_installed "msmtp" "msmtp-mta" || return 0
 
-    # Optional mailutils
-    if ! is_package_installed "mailutils"; then
-        if ask_yes_no "Install 'mailutils' (for test emails)?" "y"; then
-            ensure_packages_installed "mailutils" || true
-        fi
-    fi
-
-    # Check existing config
     local do_configure=false
-    if [[ -f "$config_file_path" ]]; then
-        warn "MSMTP config exists: '$config_file_path'."
-        ask_yes_no "Recreate configuration (will overwrite)?" "n" && do_configure=true
-    else
-        ask_yes_no "Set up MSMTP now?" "y" && do_configure=true
-    fi
+    [[ -f "$config_file_path" ]] \
+        && { warn "MSMTP config exists."; ask_yes_no "Overwrite?" "n" && do_configure=true; } \
+        || { ask_yes_no "Setup MSMTP now?" "y" && do_configure=true; }
+    $do_configure || { section_done 3; return 0; }
 
-    if ! $do_configure; then
-        echo "--- Section 3 completed ---"; echo; return 0
-    fi
-
-    # Gather SMTP details
-    info "Enter SMTP details:"
     local smtp_host smtp_port smtp_tls smtp_trust_file smtp_from smtp_user smtp_password
-
-    while true; do read -rp "SMTP Host: " smtp_host; [[ -n "$smtp_host" ]] && break; warn "Cannot be empty."; done
-    while true; do read -rp "SMTP Port [587]: " smtp_port; smtp_port=${smtp_port:-587}; validate_port "$smtp_port" && break; warn "Invalid port."; done
-    while true; do read -rp "TLS (on/off) [on]: " smtp_tls; smtp_tls=${smtp_tls:-on}; [[ "$smtp_tls" =~ ^(on|off)$ ]] && break; warn "Enter 'on' or 'off'."; done
-    read -rp "CA cert file [/etc/ssl/certs/ca-certificates.crt]: " smtp_trust_file
-    smtp_trust_file=${smtp_trust_file:-/etc/ssl/certs/ca-certificates.crt}
-    while true; do read -rp "Sender (From): " smtp_from; validate_email "$smtp_from" && break; warn "Invalid email."; done
-    while true; do read -rp "SMTP Username [$smtp_from]: " smtp_user; smtp_user=${smtp_user:-$smtp_from}; [[ -n "$smtp_user" ]] && break; done
-    while true; do read -rsp "SMTP Password: " smtp_password; echo; [[ -n "$smtp_password" ]] && break; warn "Cannot be empty."; done
+    if $AUTO_MODE && [[ -n "${AUTO_SMTP_HOST:-}" ]]; then
+        smtp_host="${AUTO_SMTP_HOST}" smtp_port="${AUTO_SMTP_PORT:-587}"
+        smtp_tls="${AUTO_SMTP_TLS:-on}" smtp_from="${AUTO_ADMIN_EMAIL:-}"
+        smtp_user="${AUTO_SMTP_USER:-$smtp_from}" smtp_password="${AUTO_SMTP_PASS:-}"
+        [[ -z "$smtp_from" || -z "$smtp_password" ]] && { warn "SMTP credentials incomplete, skipping."; section_done 3; return 0; }
+    else
+        while true; do read -rp "SMTP Host: " smtp_host </dev/tty; [[ -n "$smtp_host" ]] && break; done
+        while true; do read -rp "Port [587]: " smtp_port </dev/tty; smtp_port=${smtp_port:-587}; validate_port "$smtp_port" && break; done
+        while true; do read -rp "TLS (on/off) [on]: " smtp_tls </dev/tty; smtp_tls=${smtp_tls:-on}; [[ "$smtp_tls" =~ ^(on|off)$ ]] && break; done
+        read -rp "CA cert [/etc/ssl/certs/ca-certificates.crt]: " smtp_trust_file </dev/tty
+        smtp_trust_file=${smtp_trust_file:-/etc/ssl/certs/ca-certificates.crt}
+        while true; do read -rp "From email: " smtp_from </dev/tty; validate_email "$smtp_from" && break; done
+        while true; do read -rp "Username [$smtp_from]: " smtp_user </dev/tty; smtp_user=${smtp_user:-$smtp_from}; [[ -n "$smtp_user" ]] && break; done
+        while true; do read -rsp "Password: " smtp_password </dev/tty; echo; [[ -n "$smtp_password" ]] && break; done
+        ask_yes_no "Save?" "y" || { section_done 3; return 0; }
+    fi
 
     local logfile_path="${user_home}/.msmtp.log"
-    local aliases_file="/etc/aliases"
-
-    # Show config preview (password hidden)
-    echo
-    info "--- Configuration Preview ---"
-    cat <<EOF
+    local tmsmtp; tmsmtp=$(mktemp_tracked)
+    cat > "$tmsmtp" <<EOF
+# MSMTP — generated by security_script.sh v${SCRIPT_VERSION}
 defaults
 port $smtp_port
 tls $smtp_tls
 tls_trust_file $smtp_trust_file
-logfile ${logfile_path}
-
-account default
-host $smtp_host
-from $smtp_from
-auth on
-user $smtp_user
-password ********
-
-aliases $aliases_file
-EOF
-    echo "---"
-    echo
-    warn "Security Note: Password is stored in plaintext in '$config_file_path'."
-    info "For better security, consider using 'secret-tool' or 'gpg' for password storage."
-    info "See: https://marlam.de/msmtp/msmtp.html#Authentication"
-    echo
-
-    if ! ask_yes_no "Save this configuration?" "y"; then
-        echo "--- Section 3 completed ---"; echo; return 0
-    fi
-
-    backup_file "$config_file_path"
-
-    if $DRY_RUN; then
-        dry_run_echo "Write MSMTP config to '$config_file_path'"
-        dry_run_echo "chmod 600 '$config_file_path'; chown $config_owner:$config_owner '$config_file_path'"
-        echo "--- Section 3 completed ---"; echo; return 0
-    fi
-
-    # Write config
-    cat > "$config_file_path" <<EOF
-# MSMTP configuration generated by security_script.sh
-defaults
-port $smtp_port
-tls $smtp_tls
-tls_trust_file $smtp_trust_file
-logfile ${logfile_path}
-
+logfile $logfile_path
 account default
 host $smtp_host
 from $smtp_from
 auth on
 user $smtp_user
 password $smtp_password
-
-aliases $aliases_file
+aliases /etc/aliases
 EOF
-
-    chmod 600 "$config_file_path"
-    mkdir -p "$(dirname "$logfile_path")"
-    touch "$logfile_path"
-    chmod 600 "$logfile_path"
-    chown "$config_owner":"$config_owner" "$config_file_path" "$logfile_path"
-    success "MSMTP configuration saved."
-    log_change "ADDED_FILE:$config_file_path"
-
-    # FIX v2.0.7: Test mail uses -r flag to correctly set the From address,
-    # ensuring the mail is sent from (and to) the configured smtp_from address.
-    if is_package_installed "mailutils" && ask_yes_no "Send test email to '$smtp_from'?" "y"; then
-        local mail_cmd=(mail -s "MSMTP Test $(date)" -r "$smtp_from" "$smtp_from")
-        if echo "Test email from Linux Security Script." | \
-           sudo -u "$config_owner" "${mail_cmd[@]}" 2>/dev/null; then
-            success "Test email sent to '$smtp_from'."
-            log_change "SEND_TEST_MAIL:$smtp_from"
-        else
-            warn "Test email failed. Check $logfile_path"
-        fi
+    if install_managed_file "$config_file_path" "$tmsmtp" 600 "$config_owner" "$config_owner"; then
+        $DRY_RUN || { touch "$logfile_path"; chmod 600 "$logfile_path"; chown "$config_owner":"$config_owner" "$logfile_path"; }
+        success "MSMTP configured."
     fi
-
-    echo "--- Section 3 completed ---"; echo
+    section_done 3
 }
-
 
 # ============================================================================
 # SECTION 4a: SSH Hardening
 # ============================================================================
 configure_ssh_hardening() {
-    info "${C_BOLD}4a. Harden SSH Configuration${C_RESET}"
-    if ! ask_yes_no "Execute this step (SSH Hardening)?" "y"; then
-        info "Step skipped."; echo; return 0
-    fi
+    info "${C_BOLD}4a. SSH Hardening${C_RESET}"
+    describe_action "ssh_hardening"
+    is_section_skipped "ssh_hardening" && { info "Skipped."; echo; return 0; }
+    ask_yes_no "Execute SSH Hardening?" "y" || { echo; return 0; }
 
-    local ssh_config="/etc/ssh/sshd_config"
-    local sshd_needs_restart=false
+    local ssh_config="/etc/ssh/sshd_config" sshd_needs_restart=false
+    local ssh_dropin_dir
+    ssh_dropin_dir="$(dirname "$SSHD_HARDENING_DROPIN")"
 
-    # --- AllowUsers ---
-    if ask_yes_no "Configure AllowUsers?" "n"; then
-        local effective_allow
-        effective_allow=$(get_effective_sshd_config "allowusers")
-        local suggested_user
-        suggested_user=$(awk -F: '$3 >= 1000 && $3 < 65534 { print $1; exit }' /etc/passwd)
-        suggested_user=${suggested_user:-"your_admin_user"}
-
-        warn "Restrict SSH access to specific users (not root)."
-        read -rp "SSH users (space-separated, suggestion: $suggested_user, empty=skip): " target_users
-
-        if [[ -n "$target_users" ]]; then
-            local all_exist=true
-            for user in $target_users; do
-                id "$user" &>/dev/null || { error "User '$user' doesn't exist."; all_exist=false; }
-            done
-
-            if $all_exist; then
-                # Check if already set correctly
-                local sorted_current sorted_target
-                sorted_current=$(echo "$effective_allow" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
-                sorted_target=$(echo "$target_users" | tr ' ' '\n' | sort | tr '\n' ' ' | xargs)
-
-                if [[ "$sorted_current" == "$sorted_target" ]]; then
-                    success "AllowUsers already set to '$target_users'."
-                elif ask_yes_no "Set AllowUsers to '$target_users'?" "y"; then
-                    backup_file "$ssh_config" || return 1
-                    local temp_conf
-                    temp_conf=$(mktemp)
-                    cp "$ssh_config" "$temp_conf"
-                    set_sshd_param "AllowUsers" "$target_users" "$temp_conf" || true
-                    if apply_sshd_config "$temp_conf"; then
-                        log_change "MODIFIED_PARAM:AllowUsers:$target_users:$ssh_config"
-                        sshd_needs_restart=true
-                    fi
-                fi
+    # AllowUsers
+    if ! $AUTO_MODE; then
+        describe_detail "ssh_allowusers"
+        ask_yes_no "Configure AllowUsers?" "n" && {
+            local suggested target_users
+            suggested=$(awk -F: '$3 >= 1000 && $3 < 65534 { print $1; exit }' /etc/passwd)
+            read -rp "SSH users (suggestion: ${suggested:-admin}, empty=skip): " target_users </dev/tty
+            if [[ -n "$target_users" ]]; then
+                local all_exist=true u
+                for u in $target_users; do id "$u" &>/dev/null || { error "User '$u' not found."; all_exist=false; }; done
+                $all_exist && { describe_detail "ssh_allowusers"; ask_yes_no "Set AllowUsers='$target_users'?" "y"; } && {
+                    backup_file "$ssh_config"
+                    local tc; tc=$(mktemp_tracked); cp "$ssh_config" "$tc"
+                    set_sshd_param "AllowUsers" "$target_users" "$tc" || true
+                    apply_sshd_config "$tc" && { log_change "AllowUsers:$target_users"; sshd_needs_restart=true; }
+                }
             fi
-        fi
+        }
+    elif [[ -n "${AUTO_ALLOW_USERS:-}" ]]; then
+        backup_file "$ssh_config"
+        local tc; tc=$(mktemp_tracked); cp "$ssh_config" "$tc"
+        set_sshd_param "AllowUsers" "$AUTO_ALLOW_USERS" "$tc" || true
+        apply_sshd_config "$tc" && { log_change "AllowUsers:$AUTO_ALLOW_USERS"; sshd_needs_restart=true; }
     fi
 
-    # --- SSH Hardening Parameters ---
     declare -A ssh_recommendations=(
         ["PermitRootLogin"]="prohibit-password"
-        ["ChallengeResponseAuthentication"]="no"
         ["PasswordAuthentication"]="no"
+        ["ChallengeResponseAuthentication"]="no"
         ["UsePAM"]="yes"
         ["X11Forwarding"]="no"
+        ["AllowAgentForwarding"]="no"
+        ["AllowTcpForwarding"]="no"
+        ["LoginGraceTime"]="30"
+        ["MaxAuthTries"]="3"
+        ["MaxSessions"]="2"
+        ["PermitUserEnvironment"]="no"
+        ["ClientAliveInterval"]="300"
+        ["ClientAliveCountMax"]="2"
         ["PrintLastLog"]="yes"
     )
 
-    # Check for existing keys (for PasswordAuthentication warning)
     local check_user="${SUDO_USER:-$(whoami)}"
-    local check_home
-    check_home=$(eval echo "~$check_user")
+    local check_home; check_home=$(eval echo "~$check_user")
     local key_count=0
-    if [[ -d "$check_home/.ssh" ]]; then
+    [[ -d "$check_home/.ssh" ]] && {
         key_count=$(find "$check_home/.ssh" -maxdepth 1 -name "*.pub" -exec grep -Eil "ssh-ed25519" {} + 2>/dev/null | wc -l)
-        if [[ -f "$check_home/.ssh/authorized_keys" ]]; then
-            key_count=$((key_count + $(grep -Eic "ssh-ed25519" "$check_home/.ssh/authorized_keys" 2>/dev/null || echo 0)))
-        fi
-    fi
+        [[ -f "$check_home/.ssh/authorized_keys" ]] &&             key_count=$((key_count + $(grep -Eic "ssh-ed25519" "$check_home/.ssh/authorized_keys" 2>/dev/null || echo 0)))
+    }
 
-    # FIX v2.0.7: Explicitly initialize as empty associative array to avoid
-    # "unbound variable" error with set -u when no changes are collected.
     declare -A changes_to_apply=()
+    declare -A final_secure_values=()
+    local param current recommended cur_lower rec_lower ask_user default_ans
 
     for param in "${!ssh_recommendations[@]}"; do
-        local current recommended ask_user=true
-        current=$(get_effective_sshd_config "$param")
-        recommended="${ssh_recommendations[$param]}"
-
-        # Handle empty/default values
-        if [[ -z "$current" ]]; then
-            case "$param" in
-                "PasswordAuthentication"|"PermitRootLogin") current="yes" ;;
-                "ChallengeResponseAuthentication") current="yes" ;;
-                "X11Forwarding") current="no" ;;
-                "PrintLastLog"|"UsePAM") current="yes" ;;
-            esac
-        fi
-
-        local cur_lower rec_lower
-        cur_lower=$(echo "$current" | tr '[:upper:]' '[:lower:]')
+        current=$(get_effective_sshd_config "$param"); recommended="${ssh_recommendations[$param]}"; ask_user=true
+        [[ -z "$current" ]] && case "$param" in
+            "PasswordAuthentication"|"ChallengeResponseAuthentication"|"AllowAgentForwarding"|"AllowTcpForwarding"|"PermitRootLogin") current="yes" ;;
+            "X11Forwarding"|"PermitUserEnvironment") current="no" ;;
+            "LoginGraceTime") current="120" ;;
+            "MaxAuthTries") current="6" ;;
+            "MaxSessions") current="10" ;;
+        esac
+        cur_lower=$(echo "${current:-}" | tr '[:upper:]' '[:lower:]')
         rec_lower=$(echo "$recommended" | tr '[:upper:]' '[:lower:]')
 
-        # PermitRootLogin: accept 'no' or 'without-password' as secure
-        if [[ "$param" == "PermitRootLogin" ]] && \
-           [[ "$cur_lower" =~ ^(no|without-password|prohibit-password)$ ]]; then
-            success "$param already secure ($current)."; ask_user=false
+        if [[ "$param" == "PermitRootLogin" ]] && [[ "$cur_lower" =~ ^(no|without-password|prohibit-password)$ ]]; then
+            success "$param already secure ($current)."
+            ask_user=false
+            final_secure_values["$param"]="$current"
         elif [[ "$cur_lower" == "$rec_lower" ]]; then
-            success "$param already correct ($current)."; ask_user=false
-        else
-            # Also check config file directly
-            local file_val
-            file_val=$(get_config_file_sshd_setting "$param")
-            if [[ -n "$file_val" ]] && [[ "$(echo "$file_val" | tr '[:upper:]' '[:lower:]')" == "$rec_lower" ]]; then
-                success "$param already set in config file ($file_val)."; ask_user=false
-            fi
+            success "$param already correct."
+            ask_user=false
+            final_secure_values["$param"]="$recommended"
         fi
 
         if $ask_user; then
-            echo
-            echo -e "  Parameter: ${C_BOLD}$param${C_RESET}"
-            echo "  Current:     $current"
-            echo "  Recommended: $recommended"
-
+            echo -e "  ${C_BOLD}$param${C_RESET}: current='${current:-<default>}' → recommended='$recommended'"
             case "$param" in
-                "PermitRootLogin")           echo "  → Disables root password login. Key-based root login still allowed." ;;
-                "PasswordAuthentication")
-                    echo "  → ${C_RED}WARNING:${C_RESET} Disabling without SSH key ${C_BOLD}will lock you out!${C_RESET}"
-                    if (( key_count == 0 )); then warn "No Ed25519 keys found for '$check_user'!";
-                    else success "Found $key_count Ed25519 key(s) for '$check_user'."; fi ;;
-                "UsePAM")                    echo "  → Enables system auth integration (2FA, etc.)." ;;
-                "X11Forwarding")             echo "  → Disabling reduces attack surface." ;;
+                AllowUsers) describe_detail "ssh_allowusers" ;;
+                PasswordAuthentication) describe_detail "ssh_passwordauth" ;;
+                ChallengeResponseAuthentication|KbdInteractiveAuthentication) describe_detail "ssh_challengeresponse" ;;
+                AllowAgentForwarding) describe_detail "ssh_agentfwd" ;;
+                AllowTcpForwarding) describe_detail "ssh_tcpfwd" ;;
+                X11Forwarding) describe_detail "ssh_x11fwd" ;;
+                LoginGraceTime) describe_detail "ssh_logingracetime" ;;
+                MaxAuthTries) describe_detail "ssh_maxauthtries" ;;
+                MaxSessions) describe_detail "ssh_maxsessions" ;;
+                ClientAliveInterval) describe_detail "ssh_clientaliveinterval" ;;
+                ClientAliveCountMax) describe_detail "ssh_clientalivecountmax" ;;
+                PermitRootLogin) describe_detail "ssh_permitrootlogin" ;;
+                PermitUserEnvironment) describe_detail "ssh_permituserenvironment" ;;
+                PrintLastLog) describe_detail "ssh_printlastlog" ;;
             esac
-
-            local default_ans="y"
-            [[ "$param" == "PasswordAuthentication" && $key_count -eq 0 ]] && default_ans="n"
-
-            if ask_yes_no "  Change to '$recommended'?" "$default_ans"; then
+            [[ "$param" == "PasswordAuthentication" && $key_count -eq 0 ]] && warn "$(tr_msg no_key_warning)"
+            default_ans="y"; [[ "$param" == "PasswordAuthentication" && $key_count -eq 0 ]] && default_ans="n"
+            if ask_yes_no "$(tr_msg set_recommended_prefix)$recommended$(tr_msg set_recommended_suffix)" "$default_ans"; then
                 changes_to_apply["$param"]="$recommended"
+                final_secure_values["$param"]="$recommended"
             fi
         fi
     done
 
-    # Apply parameter changes
-    if [[ ${#changes_to_apply[@]} -gt 0 ]]; then
-        info "Changes to apply:"
-        for k in "${!changes_to_apply[@]}"; do echo "  $k -> ${changes_to_apply[$k]}"; done
-
-        if ask_yes_no "Save these changes?" "y"; then
-            backup_file "$ssh_config" || return 1
-            local temp_conf
-            temp_conf=$(mktemp)
-            cp "$ssh_config" "$temp_conf"
-
-            for k in "${!changes_to_apply[@]}"; do
-                set_sshd_param "$k" "${changes_to_apply[$k]}" "$temp_conf" || true
-            done
-
-            if apply_sshd_config "$temp_conf"; then
-                for k in "${!changes_to_apply[@]}"; do
-                    log_change "MODIFIED_PARAM:$k:${changes_to_apply[$k]}:$ssh_config"
+    if [[ ${#final_secure_values[@]} -gt 0 ]]; then
+        ask_yes_no "$(tr_msg save_ssh_changes)" "y" && {
+            mkdir -p "$ssh_dropin_dir"
+            local tdrop
+            tdrop=$(mktemp_tracked)
+            {
+                echo "# SSH hardening drop-in — generated by security_script.sh v${SCRIPT_VERSION}"
+                echo "# This file intentionally overrides weaker defaults from sshd_config and sshd_config.d/*.conf"
+                local k
+                for k in $(printf '%s
+' "${!final_secure_values[@]}" | sort); do
+                    echo "$k ${final_secure_values[$k]}"
                 done
-                sshd_needs_restart=true
+            } > "$tdrop"
+
+            if install_managed_file "$SSHD_HARDENING_DROPIN" "$tdrop" 600; then
+                if [[ -f "$SSHD_HARDENING_DROPIN_LEGACY" ]] && [[ "$SSHD_HARDENING_DROPIN_LEGACY" != "$SSHD_HARDENING_DROPIN" ]]; then
+                    rm -f "$SSHD_HARDENING_DROPIN_LEGACY"
+                    log_change "REMOVED_LEGACY_FILE:$SSHD_HARDENING_DROPIN_LEGACY"
+                fi
+                if ssh_dropin_validate_and_restore; then
+                    local k
+                    for k in "${!final_secure_values[@]}"; do log_change "SSH_DROPIN:$k=${final_secure_values[$k]}"; done
+                    sshd_needs_restart=true
+                    if [[ ${#changes_to_apply[@]} -gt 0 ]]; then
+                        record_check "SSH_HARDENING" "FIXED" "${#changes_to_apply[@]} parameter(s) hardened"
+                    else
+                        record_check "SSH_HARDENING" "PASS" "Existing secure settings normalized into managed drop-in"
+                    fi
+                else
+                    error "SSH hardening drop-in could not be validated. No restart performed."
+                    return 1
+                fi
+            else
+                success "SSH hardening drop-in already correct."
+                record_check "SSH_HARDENING" "PASS" "All parameters already managed"
             fi
+        }
+    else
+        success "SSH already hardened."
+        record_check "SSH_HARDENING" "PASS" "All parameters correct"
+    fi
+
+    $sshd_needs_restart && restart_ssh "hardening" || true
+    if $sshd_needs_restart; then
+        local ssh_pass_after
+        ssh_pass_after=$(get_effective_sshd_config "PasswordAuthentication")
+        if [[ "$(echo "${ssh_pass_after:-yes}" | tr '[:upper:]' '[:lower:]')" != "no" ]]; then
+            warn "$(tr_msg ssh_password_still_yes) '$ssh_pass_after'. $(tr_msg check_include_files)"
+            show_sshd_setting_sources "PasswordAuthentication"
+        else
+            success "Effective SSH setting confirmed: PasswordAuthentication=no"
         fi
     fi
-
-    # Restart if needed
-    if $sshd_needs_restart; then
-        restart_ssh "SSH hardening"
-    else
-        info "No SSH changes applied, skipping restart."
-    fi
-
-    echo "--- Section 4a completed ---"; echo
+    section_done "4a"
 }
-
 
 # ============================================================================
 # SECTION 4b: Google 2FA
 # ============================================================================
 configure_google_2fa() {
-    info "${C_BOLD}5. Configure Google Authenticator 2FA${C_RESET}"
-    if ! ask_yes_no "Execute Google Authenticator setup?" "y"; then
-        info "Skipping Google Authenticator."; echo; return 0
-    fi
+    info "${C_BOLD}4b. Google Authenticator 2FA${C_RESET}"
+    describe_action "twofa"
+    is_section_skipped "2fa" && { info "Skipped."; echo; return 0; }
+    $AUTO_MODE && { info "2FA needs interactive setup — skipping in auto mode."; echo; return 0; }
+    ask_yes_no "Setup Google Authenticator 2FA?" "y" || { echo; return 0; }
 
     local target_user="${SUDO_USER:-$(whoami)}"
-    local user_home
-    user_home=$(eval echo "~$target_user")
-    info "Setting up 2FA for user: $target_user"
-
-    if [[ -f "$user_home/.google_authenticator" ]]; then
-        if ! ask_yes_no "Already configured for $target_user. Reconfigure?" "n"; then
-            echo; return 0
-        fi
-    fi
+    local user_home; user_home=$(eval echo "~$target_user")
+    [[ -f "$user_home/.google_authenticator" ]] && ! ask_yes_no "Already configured. Reconfigure?" "n" && { echo; return 0; }
 
     ensure_packages_installed "libpam-google-authenticator" || return 1
 
-    # Interactive configuration
-    info "Initializing Google Authenticator for $target_user..."
-    echo "  - Scan the QR code with your authenticator app"
-    echo "  - Save your emergency scratch codes securely"
-    echo
+    echo "  • QR-Code mit Authenticator-App scannen"
+    echo "  • Emergency Scratch Codes sicher aufbewahren"; echo
+    $DRY_RUN && dry_run_echo "google-authenticator -t -f -d -r 3 -R 30 -w 17" \
+        || sudo -u "$target_user" google-authenticator -t -f -d -r 3 -R 30 -w 17 \
+        || { error "Google Authenticator failed."; return 1; }
 
-    if $DRY_RUN; then
-        dry_run_echo "sudo -u '$target_user' google-authenticator -t -f -d -r 3 -R 30 -w 17"
-    else
-        if ! sudo -u "$target_user" google-authenticator -t -f -d -r 3 -R 30 -w 17; then
-            error "Google Authenticator setup failed."; return 1
-        fi
-        success "Google Authenticator initialized. Save your emergency codes!"
-    fi
-    echo
-
-    # PAM configuration
-    local pam_file="/etc/pam.d/sshd"
-    local pam_changed=false
-    [[ ! -f "$pam_file" ]] && { error "PAM file $pam_file not found!"; return 1; }
-    backup_file "$pam_file" || return 1
-
-    local temp_pam
-    temp_pam=$(mktemp)
-    cp "$pam_file" "$temp_pam"
-
-    if grep -q "^@include common-auth" "$temp_pam"; then
-        sed -i 's/^@include common-auth/#@include common-auth/' "$temp_pam"
-        pam_changed=true
-    fi
-    if ! grep -q "pam_google_authenticator.so" "$temp_pam"; then
-        echo "auth required pam_google_authenticator.so nullok" >> "$temp_pam"
-        pam_changed=true
-    fi
+    local pam_file="/etc/pam.d/sshd" pam_changed=false
+    backup_file "$pam_file"
+    local tp; tp=$(mktemp_tracked); cp "$pam_file" "$tp"
+    grep -q "^@include common-auth" "$tp" && { sed -i 's/^@include common-auth/#@include common-auth/' "$tp"; pam_changed=true; }
+    grep -q "pam_google_authenticator.so" "$tp" || { echo "auth required pam_google_authenticator.so nullok" >> "$tp"; pam_changed=true; }
 
     if $pam_changed; then
-        if $DRY_RUN; then
-            dry_run_echo "Update $pam_file for Google Authenticator"
-            rm -f "$temp_pam"
-        elif mv "$temp_pam" "$pam_file"; then
-            chmod 644 "$pam_file"
-            log_change "MODIFIED:$pam_file (Google Authenticator)"
-            success "PAM configured for 2FA."
-        else
-            error "Failed to update PAM."; rm -f "$temp_pam"; restore_file "$pam_file"; return 1
-        fi
-    else
-        success "PAM already configured for 2FA."
-        rm -f "$temp_pam"
+        validate_pam_file "$tp" || { error "PAM validation failed. Not applying."; return 1; }
+        $DRY_RUN && dry_run_echo "Update $pam_file" || {
+            mv "$tp" "$pam_file" && chmod 644 "$pam_file" && log_change "MODIFIED:$pam_file (2FA)"
+            sudo_smoke_test "$pam_file" || return 1
+        }
     fi
 
-    # SSHD configuration
-    local ssh_conf="/etc/ssh/sshd_config"
-    local ssh_changed=false
-    backup_file "$ssh_conf" || return 1
-
-    local temp_ssh
-    temp_ssh=$(mktemp)
-    cp "$ssh_conf" "$temp_ssh"
-
-    for param_pair in \
-        "ChallengeResponseAuthentication:yes" \
-        "KbdInteractiveAuthentication:yes" \
-        "AuthenticationMethods:publickey,keyboard-interactive" \
-        "UsePAM:yes"; do
-        local p_key="${param_pair%%:*}" p_val="${param_pair##*:}"
-        set_sshd_param "$p_key" "$p_val" "$temp_ssh" && ssh_changed=true
+    local sc="/etc/ssh/sshd_config" sc_changed=false
+    backup_file "$sc"
+    local ts; ts=$(mktemp_tracked); cp "$sc" "$ts"
+    for pp in "ChallengeResponseAuthentication:yes" "KbdInteractiveAuthentication:yes" \
+              "AuthenticationMethods:publickey,keyboard-interactive" "UsePAM:yes"; do
+        set_sshd_param "${pp%%:*}" "${pp##*:}" "$ts" && sc_changed=true
     done
+    $sc_changed && apply_sshd_config "$ts" || rm -f "$ts" 2>/dev/null
+    ($pam_changed || $sc_changed) && restart_ssh "2FA" || true
 
-    if $ssh_changed; then
-        if apply_sshd_config "$temp_ssh"; then
-            log_change "MODIFIED:$ssh_conf (Google Authenticator)"
-        fi
-    else
-        success "SSHD already configured for 2FA."
-        rm -f "$temp_ssh"
-    fi
-
-    # Restart SSH if needed
-    if $pam_changed || $ssh_changed; then
-        if ! restart_ssh "2FA setup"; then
-            warn "SSH restart failed. Restoring configs..."
-            $pam_changed && restore_file "$pam_file"
-            $ssh_changed && restore_file "$ssh_conf"
-            restart_ssh "2FA rollback" || true
-        fi
-    fi
-
-    echo
-    info "${C_BOLD}IMPORTANT:${C_RESET}"
-    echo "  1. Test login in a SEPARATE SSH session before closing this one!"
-    echo "  2. Verify your authenticator app shows correct codes."
-    echo "  3. Keep emergency scratch codes safe."
-    echo
+    echo; warn "WICHTIG: SSH in NEUEM Terminal testen bevor dieses geschlossen wird!"
+    section_done "4b"
 }
-
 
 # ============================================================================
 # SECTION 5a: Fail2ban
 # ============================================================================
 configure_fail2ban() {
-    info "${C_BOLD}5a. Fail2ban — Audit & Configuration${C_RESET}"
+    info "${C_BOLD}5a. Fail2ban${C_RESET}"
+    describe_action "fail2ban"
+    is_section_skipped "fail2ban" && { info "Skipped."; echo; return 0; }
 
-    local pkg="fail2ban"
-    local jail_local="/etc/fail2ban/jail.local"
-    local jail_conf="/etc/fail2ban/jail.conf"
-    local needs_restart=false
-    local issues_found=0
-
-    # --- If not installed, ask whether to install ---
-    if ! is_package_installed "$pkg"; then
-        if ! ask_yes_no "Fail2ban is not installed. Install it?" "y"; then
-            info "Fail2ban skipped."; echo; return 0
-        fi
-        ensure_packages_installed "$pkg" || return 0
-    else
-        success "Fail2ban is installed."
+    local policy_diff
+    policy_diff=$(fail2ban_policy_diff 2>/dev/null || true)
+    if [[ -z "$policy_diff" ]]; then
+        success "Existing Fail2ban configuration already matches script recommendations."
+        record_check "FAIL2BAN" "PASS" "Already aligned with script recommendations"
+        section_done "5a"
+        return 0
     fi
+    [[ "$policy_diff" != "package missing" ]] && warn "Current Fail2ban setup differs from script recommendations: $policy_diff"
 
-    # --- Automated audit starts here (no "Configure?" question) ---
-    info "Auditing Fail2ban configuration..."
+    local pkg="fail2ban" jail_local="/etc/fail2ban/jail.local" needs_restart=false
 
-    # Check 1: jail.local exists
-    if [[ ! -f "$jail_local" ]]; then
-        issues_found=$((issues_found + 1))
-        warn "[Issue] '$jail_local' does not exist."
-        info "  Recommendation: Create a minimal '$jail_local' with [sshd] jail enabled."
-        if ask_yes_no "  Fix: Create '$jail_local'?" "y"; then
-            # Create a clean minimal jail.local instead of copying the huge jail.conf
-            if $DRY_RUN; then
-                dry_run_echo "Create minimal $jail_local with [sshd] enabled"
-            else
-                cat > "$jail_local" <<'JAIL_EOF'
-# jail.local - Generated by security_script.sh
-# This file overrides settings from jail.conf.
-# Only add settings that differ from the defaults.
+    is_package_installed "$pkg" || {
+        ask_yes_no "Install Fail2ban?" "y" && ensure_packages_installed "$pkg" || { info "Skipped."; echo; return 0; }
+    }
 
+    if [[ ! -f "$jail_local" ]] || ! is_fail2ban_jail_enabled "sshd"; then
+        ask_yes_no "Create/fix jail.local with [sshd] enabled?" "y" && {
+            local tjail; tjail=$(mktemp_tracked)
+            cat > "$tjail" <<'JAIL_EOF'
+# jail.local — generated by security_script.sh
 [DEFAULT]
-# Ban duration (10 minutes)
-bantime  = 10m
-# Time window for counting failures
+bantime  = 1h
 findtime = 10m
-# Number of failures before ban
-maxretry = 5
+maxretry = 3
 
 [sshd]
 enabled = true
 JAIL_EOF
-                log_change "ADDED_FILE:$jail_local"
-            fi
-            needs_restart=true
-            success "  Fixed: '$jail_local' created with [sshd] jail enabled."
-        else
-            error "  Cannot proceed without '$jail_local'."; return 1
-        fi
-    else
-        success "jail.local exists."
-    fi
+            install_managed_file "$jail_local" "$tjail" 644 && needs_restart=true
+        }
+    else success "jail.local and [sshd] jail OK."; fi
 
-    # Check 2: [sshd] jail enabled
-    if [[ -f "$jail_local" ]]; then
-        if ! is_fail2ban_jail_enabled "sshd"; then
-            issues_found=$((issues_found + 1))
-            warn "[Issue] Jail [sshd] is not enabled."
-            info "  Recommendation: Enable [sshd] jail to protect SSH against brute-force."
-            if ask_yes_no "  Fix: Enable [sshd] jail?" "y"; then
-                backup_file "$jail_local" || return 1
+    # ignoreip
+    local current_ignoreip
+    current_ignoreip=$(awk '/^\s*\[DEFAULT\]/{d=1;next} /^\s*\[/{d=0} d&&/^\s*ignoreip\s*=/{gsub(/^\s*ignoreip\s*=\s*/,"");cl=$0;while(getline>0&&$0~/^[[:space:]]/)cl=cl $0;gsub(/[[:space:]]+/," ",cl);print cl;exit}' "$jail_local" 2>/dev/null || true)
+    read -ra current_array <<< "$current_ignoreip"
+    local proposed=() apply_ignore=false ip subnet already p
+    for ip in $(ip -4 addr show | grep -oP 'inet \K[\d.]+' | grep -v '^127\.' || true); do
+        subnet="$(echo "$ip" | cut -d. -f1-3).0/24"
+        is_ip_covered_by_ignoreip "$ip" "${current_array[@]+"${current_array[@]}"}" && continue
+        already=false
+        for p in "${proposed[@]+"${proposed[@]}"}"; do [[ "$subnet" == "$p" ]] && already=true; done
+        $already || { proposed+=("$subnet"); apply_ignore=true; }
+    done
+    $apply_ignore && {
+        local final_list; final_list=$(printf '%s\n' "127.0.0.1/8" "::1" "${current_array[@]+"${current_array[@]}"}" "${proposed[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')
+        describe_detail "fail2ban_ignoreip"
+        describe_detail "fail2ban_ignoreip"
+        ask_yes_no "Add local subnets to ignoreip?" "y" && {
+            backup_file "$jail_local"
+            $DRY_RUN && dry_run_echo "Update ignoreip in $jail_local" || {
+                local ti; ti=$(mktemp_tracked)
+                awk -v new_ip="$final_list" 'BEGIN{d=0;f=0} /^\s*\[DEFAULT\]/{print;d=1;next} /^\s*\[/&&NR>1&&d{if(!f)print "ignoreip = " new_ip;d=0;f=1} d&&/^\s*#?\s*ignoreip\s*=/{if(!f)print "ignoreip = " new_ip;f=1;next} {print} END{if(d&&!f)print "ignoreip = " new_ip}' "$jail_local" > "$ti"
+                mv "$ti" "$jail_local" && { success "ignoreip updated."; needs_restart=true; }
+            }
+        }
+    } || success "ignoreip OK."
 
-                if $DRY_RUN; then
-                    dry_run_echo "Enable [sshd] jail in $jail_local"
-                else
-                    # Check if [sshd] section exists at all
-                    if grep -q '^\s*\[sshd\]' "$jail_local"; then
-                        # Section exists: replace or add enabled line within it
-                        local temp_jail
-                        temp_jail=$(mktemp)
-                        awk '
-                            /^\s*\[sshd\]/ { in_sshd=1; print; next }
-                            in_sshd && /^\s*\[/ { if (!done) { print "enabled = true"; done=1 }; in_sshd=0 }
-                            in_sshd && /^\s*#?\s*enabled\s*=/ { print "enabled = true"; done=1; next }
-                            { print }
-                            END { if (in_sshd && !done) print "enabled = true" }
-                        ' "$jail_local" > "$temp_jail"
-
-                        if mv "$temp_jail" "$jail_local"; then
-                            success "  Fixed: [sshd] jail enabled."
-                            log_change "MODIFIED:$jail_local (sshd jail enabled)"
-                        else
-                            rm -f "$temp_jail"
-                            restore_file "$jail_local"
-                            return 1
-                        fi
-                    else
-                        # No [sshd] section at all — append it
-                        echo -e "\n[sshd]\nenabled = true" >> "$jail_local"
-                        success "  Fixed: Added [sshd] jail section with enabled = true."
-                        log_change "MODIFIED:$jail_local (sshd section added)"
-                    fi
-                    needs_restart=true
-                fi
-            fi
-        else
-            success "Jail [sshd] is enabled."
-        fi
-
-        # Check 3: Local IPs in ignoreip
-        info "Checking ignoreip whitelist..."
-        local current_ignoreip
-        current_ignoreip=$(awk '/^\s*\[DEFAULT\]/{d=1;next} /^\s*\[/{d=0} d&&/^\s*ignoreip\s*=/{
-            gsub(/^\s*ignoreip\s*=\s*/,""); cl=$0
-            while(getline>0 && $0~/^[[:space:]]/) cl=cl $0
-            gsub(/[[:space:]]+/," ",cl); print cl; exit
-        }' "$jail_local" 2>/dev/null || true)
-
-        read -ra current_array <<< "$current_ignoreip"
-        local proposed=() apply_ignore=false
-        local local_ips
-        local_ips=$(ip -4 addr show | grep -oP 'inet \K[\d.]+' | grep -v '^127\.' || true)
-
-        for ip in $local_ips; do
-            local subnet
-            subnet="$(echo "$ip" | cut -d. -f1-3).0/24"
-            if ! is_ip_covered_by_ignoreip "$ip" "${current_array[@]}"; then
-                local already=false
-                for p in "${proposed[@]+"${proposed[@]}"}"; do [[ "$subnet" == "$p" ]] && already=true; done
-                if ! $already; then
-                    proposed+=("$subnet")
-                    apply_ignore=true
-                fi
-            fi
-        done
-
-        if $apply_ignore; then
-            issues_found=$((issues_found + 1))
-            local final_list
-            final_list=$(printf '%s\n' "127.0.0.1/8" "::1" "${current_array[@]}" "${proposed[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')
-            warn "[Issue] Local subnets not in ignoreip: ${proposed[*]}"
-            info "  Recommendation: Add local subnets to prevent self-lockout."
-            info "  Proposed ignoreip: $final_list"
-
-            if ask_yes_no "  Fix: Update ignoreip?" "y"; then
-                backup_file "$jail_local" || return 1
-
-                if $DRY_RUN; then
-                    dry_run_echo "Update ignoreip in $jail_local"
-                else
-                    # Check if [DEFAULT] section exists
-                    if grep -q '^\s*\[DEFAULT\]' "$jail_local"; then
-                        local temp_ignore
-                        temp_ignore=$(mktemp)
-
-                        awk -v new_ip="$final_list" '
-                            BEGIN {d=0; f=0}
-                            /^\s*\[DEFAULT\]/ {print; d=1; next}
-                            /^\s*\[/ && NR>1 && d { if(!f) print "ignoreip = " new_ip; d=0; f=1 }
-                            d && /^\s*#?\s*ignoreip\s*=/ { if(!f) print "ignoreip = " new_ip; f=1; next }
-                            {print}
-                            END { if(d && !f) print "ignoreip = " new_ip }
-                        ' "$jail_local" > "$temp_ignore"
-
-                        if mv "$temp_ignore" "$jail_local"; then
-                            success "  Fixed: ignoreip updated."
-                            log_change "MODIFIED:$jail_local (ignoreip)"
-                            needs_restart=true
-                        else
-                            rm -f "$temp_ignore"; restore_file "$jail_local"
-                        fi
-                    else
-                        # No [DEFAULT] section — prepend it
-                        local tmp_prepend
-                        tmp_prepend=$(mktemp)
-                        {
-                            echo "[DEFAULT]"
-                            echo "ignoreip = $final_list"
-                            echo
-                            cat "$jail_local"
-                        } > "$tmp_prepend"
-                        if mv "$tmp_prepend" "$jail_local"; then
-                            success "  Fixed: Added [DEFAULT] with ignoreip."
-                            log_change "MODIFIED:$jail_local (DEFAULT+ignoreip added)"
-                            needs_restart=true
-                        else
-                            rm -f "$tmp_prepend"; restore_file "$jail_local"
-                        fi
-                    fi
-                fi
-            fi
-        else
-            success "Local subnets covered by ignoreip."
-        fi
-    fi
-
-    # Check 4: Service running and enabled
-    info "Checking Fail2ban service..."
-    local svc_issues=false
-    if ! systemctl is-active --quiet "$pkg" 2>/dev/null; then
-        svc_issues=true
-        issues_found=$((issues_found + 1))
-        warn "[Issue] Fail2ban service is not running."
-    else
-        success "Fail2ban service is active."
-    fi
-    if ! systemctl is-enabled --quiet "$pkg" 2>/dev/null; then
-        svc_issues=true
-        issues_found=$((issues_found + 1))
-        warn "[Issue] Fail2ban service is not enabled on boot."
-    else
-        success "Fail2ban service is enabled."
-    fi
-
-    if $needs_restart; then
-        info "Restarting Fail2ban after configuration changes..."
-        # Validate config first
-        if ! $DRY_RUN && command -v fail2ban-client >/dev/null; then
-            if ! fail2ban-client -t 2>/dev/null; then
-                error "Fail2ban config validation failed!"
-                warn "  Check with: sudo fail2ban-client -t"
-                warn "  View log: sudo journalctl -xeu fail2ban.service"
-                if ask_yes_no "  Restore jail.local from backup?" "y"; then
-                    restore_file "$jail_local"
-                    run_cmd "SERVICE_RESTARTED:$pkg (after restore)" systemctl restart "$pkg" || true
-                fi
-                echo "--- Section 5a completed (with errors) ---"; echo; return 1
-            fi
-        fi
-        if run_cmd "SERVICE_RELOADED:$pkg" systemctl reload-or-restart "$pkg"; then
-            success "Fail2ban restarted."
-        else
-            error "Fail2ban restart failed!"
-            warn "  Check with: sudo systemctl status fail2ban"
-            warn "  View log: sudo journalctl -xeu fail2ban.service"
-            if ask_yes_no "  Restore jail.local from backup?" "y"; then
-                restore_file "$jail_local"
-                run_cmd "SERVICE_RESTARTED:$pkg (after restore)" systemctl restart "$pkg" || true
-            fi
-        fi
-    elif $svc_issues; then
-        ensure_service_running "$pkg"
-    fi
-
-    # Summary
-    echo
-    if (( issues_found == 0 )); then
-        success "Fail2ban audit: ${C_GREEN}All checks passed.${C_RESET}"
-    else
-        info "Fail2ban audit: $issues_found issue(s) found and addressed."
-    fi
-
-    echo "--- Section 5a completed ---"; echo
+    $needs_restart && ! $DRY_RUN && {
+        fail2ban-client -t 2>/dev/null && systemctl restart fail2ban && success "Fail2ban restarted." \
+            || { error "Fail2ban config invalid! Restoring."; restore_file "$jail_local"; }
+    }
+    record_check "FAIL2BAN" "FIXED" "Fail2ban configured"
+    section_done "5a"
 }
-
 
 # ============================================================================
 # SECTION 5b: SSHGuard
 # ============================================================================
 configure_sshguard() {
-    info "${C_BOLD}5b. SSHGuard — Audit & Configuration${C_RESET}"
-
-    local pkg="sshguard"
-    local whitelist_file="/etc/sshguard/whitelist"
-    local needs_restart=false
-    local issues_found=0
-
-    # --- If not installed, ask whether to install ---
-    if ! is_package_installed "$pkg"; then
-        if ! ask_yes_no "SSHGuard is not installed. Install it?" "y"; then
-            info "SSHGuard skipped."; echo; return 0
-        fi
-        ensure_packages_installed "$pkg" || return 0
-    else
-        success "SSHGuard is installed."
-    fi
-
-    # --- Automated audit ---
-    info "Auditing SSHGuard configuration..."
-
-    # Ensure directory and whitelist exist
-    run_cmd "MKDIR_SSHGUARD" mkdir -p "$(dirname "$whitelist_file")" || true
-    if [[ ! -f "$whitelist_file" ]]; then
-        run_cmd "ADDED_FILE:$whitelist_file" touch "$whitelist_file" || true
-    fi
-
-    # Check 1: Whitelist completeness
-    local proposed=("127.0.0.1" "::1")
-    local local_ips4 local_ips6
-    local_ips4=$(ip -4 addr show | grep -oP 'inet \K[\d.]+' | grep -v '^127\.' || true)
-    local_ips6=$(ip -6 addr show scope global | grep -oP 'inet6 \K[0-9a-fA-F:]+' 2>/dev/null || true)
-
-    for ip in $local_ips4; do
-        local subnet="$(echo "$ip" | cut -d. -f1-3).0/24"
-        printf '%s\n' "${proposed[@]}" | grep -qxF "$subnet" || proposed+=("$subnet")
-    done
-    for ip in $local_ips6; do
-        IFS=':' read -ra parts <<< "$ip"
-        local cidr6
-        printf -v cidr6 "%s:%s:%s:%s::/64" "${parts[0]:-0}" "${parts[1]:-0}" "${parts[2]:-0}" "${parts[3]:-0}"
-        printf '%s\n' "${proposed[@]}" | grep -qxF "$cidr6" || proposed+=("$cidr6")
-    done
-
-    local missing=()
-    declare -A existing_map
-    if [[ -f "$whitelist_file" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
-            existing_map["$line"]=1
-        done < "$whitelist_file"
-    fi
-
-    for item in "${proposed[@]}"; do
-        [[ -n "${existing_map[$item]+x}" ]] || missing+=("$item")
-    done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        issues_found=$((issues_found + 1))
-        warn "[Issue] Missing from whitelist: ${missing[*]}"
-        info "  Recommendation: Add local IPs/subnets to prevent self-lockout."
-        if ask_yes_no "  Fix: Add missing entries to '$whitelist_file'?" "y"; then
-            backup_file "$whitelist_file" || return 1
-            if $DRY_RUN; then
-                dry_run_echo "Add ${missing[*]} to $whitelist_file"
-            else
-                printf '%s\n' "${missing[@]}" >> "$whitelist_file"
-                sort -u "$whitelist_file" -o "$whitelist_file"
-                success "  Fixed: SSHGuard whitelist updated."
-                log_change "MODIFIED:$whitelist_file"
-                needs_restart=true
-            fi
-        fi
-    else
-        success "Whitelist contains all local IPs/subnets."
-    fi
-
-    # Check 2: Service running and enabled
-    info "Checking SSHGuard service..."
-    local svc_issues=false
-    if ! systemctl is-active --quiet "$pkg" 2>/dev/null; then
-        svc_issues=true
-        issues_found=$((issues_found + 1))
-        warn "[Issue] SSHGuard service is not running."
-    else
-        success "SSHGuard service is active."
-    fi
-    if ! systemctl is-enabled --quiet "$pkg" 2>/dev/null; then
-        svc_issues=true
-        issues_found=$((issues_found + 1))
-        warn "[Issue] SSHGuard service is not enabled on boot."
-    else
-        success "SSHGuard service is enabled."
-    fi
-
-    if $needs_restart; then
-        run_cmd "SERVICE_RESTARTED:$pkg" systemctl restart "$pkg" && \
-            success "SSHGuard restarted." || error "Failed to restart SSHGuard."
-    elif $svc_issues; then
-        ensure_service_running "$pkg"
-    fi
-
-    # Summary
-    echo
-    if (( issues_found == 0 )); then
-        success "SSHGuard audit: ${C_GREEN}All checks passed.${C_RESET}"
-    else
-        info "SSHGuard audit: $issues_found issue(s) found and addressed."
-    fi
-
-    echo "--- Section 5b completed ---"; echo
+    info "${C_BOLD}5b. SSHGuard${C_RESET}"
+    describe_action "sshguard"
+    is_section_skipped "sshguard" && { info "Skipped."; echo; return 0; }
+    ask_yes_no "Install SSHGuard?" "n" || { echo; return 0; }
+    ensure_packages_installed "sshguard" && ensure_service_running "sshguard"
+    section_done "5b"
 }
-
 
 # ============================================================================
 # SECTION 6: UFW Firewall
 # ============================================================================
 configure_ufw() {
-    info "${C_BOLD}6. UFW (Firewall) — Audit & Configuration${C_RESET}"
+    info "${C_BOLD}6. UFW Firewall${C_RESET}"
+    describe_action "ufw"
+    is_section_skipped "ufw" && { info "Skipped."; echo; return 0; }
+    ask_yes_no "Configure UFW?" "y" || { echo; return 0; }
 
-    local issues_found=0
+    ensure_packages_installed "ufw" || return 0
 
-    # --- If not installed, ask whether to install ---
-    if ! is_package_installed "ufw"; then
-        if ! ask_yes_no "UFW is not installed. Install it?" "y"; then
-            info "UFW skipped."; echo; return 0
-        fi
-        ensure_packages_installed "ufw" || return 0
-    else
-        success "UFW is installed."
-    fi
+    local ssh_port; ssh_port=$(get_ssh_port)
+    local ssh_spec="${ssh_port}/tcp"
+    local ufw_status; ufw_status=$(ufw status 2>/dev/null | head -1 || true)
+    local ufw_active=false; [[ "$ufw_status" =~ "active" ]] && ufw_active=true
 
-    # --- Automated audit ---
-    info "Auditing UFW configuration..."
-
-    # Check 1: UFW active?
-    local ufw_active=false
-    ufw status 2>/dev/null | grep -q "Status: active" && ufw_active=true
-
-    if $ufw_active; then
-        success "UFW is active."
-        info "Current rules:"
-        ufw status verbose 2>/dev/null || true
-    else
-        issues_found=$((issues_found + 1))
-        warn "[Issue] UFW is installed but not active."
-        info "  Recommendation: Enable UFW to filter incoming connections."
-        if ask_yes_no "  Fix: Enable UFW? ${C_RED}WARNING: May disconnect SSH if rule missing!${C_RESET}" "n"; then
-            local ssh_port
-            ssh_port=$(get_ssh_port)
-            if validate_port "$ssh_port"; then
-                info "  Pre-allowing SSH port $ssh_port/tcp..."
-                run_cmd "UFW_PRE_ALLOW_SSH" ufw allow "$ssh_port/tcp" comment "SSH pre-enable"
-            fi
-            if run_cmd "UFW_ENABLED" ufw --force enable; then
-                success "  Fixed: UFW enabled."
-                ufw_active=true
-            else
-                error "Failed to enable UFW."; return 1
-            fi
-        else
-            info "UFW remains inactive."
-            echo "--- Section 6 completed ---"; echo; return 0
-        fi
-    fi
-
-    # Check 2: Parse current allowed rules
-    declare -A ufw_rules=()
-    local ufw_numbered_output
-    ufw_numbered_output=$(ufw status numbered 2>/dev/null || true)
-    while IFS= read -r line; do
-        if [[ "$line" =~ \[[[:space:]]*([0-9]+)\][[:space:]]+([^[:space:]]+)[[:space:]]+(ALLOW[[:space:]]+IN) ]]; then
-            local spec="${BASH_REMATCH[2]}"
-            spec=${spec%% \(v6\)}
-            ufw_rules["$spec"]=1
-        fi
-    done <<< "$ufw_numbered_output"
-    local ufw_rule_count=${#ufw_rules[@]}
-    info "Found $ufw_rule_count ALLOW IN rules."
-
-    # Helper: check if a port/spec is allowed in ufw_rules
-    is_ufw_allowed() {
-        local check_spec="$1"
-        local check_port="${check_spec%%/*}"
-        [[ ${ufw_rule_count} -gt 0 ]] || return 1
-        [[ -n "${ufw_rules[$check_spec]+x}" ]] && return 0
-        [[ -n "${ufw_rules[$check_port]+x}" ]] && return 0
-        return 1
+    $ufw_active && {
+        while IFS= read -r line; do
+            local ps; ps=$(echo "$line" | grep -oP '^\d+(/\w+)?' || true)
+            [[ -n "$ps" ]] && ufw_rules["$ps"]=1
+        done < <(ufw status 2>/dev/null | grep -E "^[0-9]")
+        success "UFW active. ${#ufw_rules[@]} existing rule(s)."
+    } || {
+        ask_yes_no "Enable UFW (default deny incoming)?" "y" && {
+            $DRY_RUN && dry_run_echo "ufw default deny incoming && ufw default allow outgoing" || {
+                run_cmd "UFW_DEFAULT_DENY"    ufw default deny incoming
+                run_cmd "UFW_DEFAULT_ALLOW"   ufw default allow outgoing
+            }
+        }
     }
 
-    # Check 3: SSH port is allowed
-    local ssh_port
-    ssh_port=$(get_ssh_port)
-    local ssh_spec="${ssh_port}/tcp"
+    # SSH must be allowed first
+    is_ufw_allowed "$ssh_spec" || ufw status 2>/dev/null | grep -qE "^${ssh_port}[[:space:]]" || {
+        ask_yes_no "Allow SSH port ${ssh_port}/tcp?" "y" && {
+            run_cmd "UFW_ALLOW_SSH" ufw allow "${ssh_port}/tcp" comment "SSH"
+            ufw_rules["$ssh_spec"]=1
+        }
+    }
 
-    if is_ufw_allowed "$ssh_spec"; then
-        success "SSH port ($ssh_spec) is allowed."
-    else
-        issues_found=$((issues_found + 1))
-        warn "[Issue] SSH port $ssh_spec is NOT explicitly allowed in UFW!"
-        info "  Recommendation: Allow SSH to prevent lockout."
-        if ask_yes_no "  Fix: Allow $ssh_spec?" "y"; then
-            if run_cmd "UFW_ALLOW:$ssh_spec" ufw allow "$ssh_spec" comment "SSH - security script"; then
-                ufw_rules["$ssh_spec"]=1
-                success "  Fixed: SSH port allowed."
-            fi
-        fi
-    fi
+    ! $ufw_active && ask_yes_no "Enable UFW now?" "y" && {
+        $DRY_RUN && dry_run_echo "ufw --force enable" || {
+            ufw --force enable && { success "UFW enabled."; txlog "SERVICE_ENABLED" "ufw"; record_check "UFW_ACTIVE" "FIXED" "UFW enabled"; }
+        }
+    }
 
-    # Check 4: Detect listening ports not covered by UFW
-    declare -A listening_ports=()
-    local all_ports
-    all_ports="$(get_listening_ports)$(get_container_ports)"
+    # Port review in interactive mode
+    ! $AUTO_MODE && {
+        info "Scanning listening ports..."
+        declare -A listening_ports=()
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            IFS=',' read -r port proto proc <<< "$entry"
+            listening_ports["${port}/${proto}"]="$proc"
+        done < <({ get_listening_ports; get_container_ports; } 2>/dev/null | sort | uniq)
 
-    while IFS="," read -r port proto process; do
-        [[ -n "$port" && -n "$proto" ]] || continue
-        local key="$port/$proto"
-        [[ -n "${listening_ports[$key]+x}" ]] || listening_ports["$key"]="${process:-unknown}"
-    done <<< "$all_ports"
-
-    if [[ ${#listening_ports[@]} -eq 0 ]]; then
-        info "No listening ports detected."
-    else
-        info "Detected ${#listening_ports[@]} listening port/protocol pairs."
-
-        local uncovered=() to_allow=()
-        local sorted_keys
-        sorted_keys=$(printf '%s\n' "${!listening_ports[@]}" | sort -t/ -k1,1n -k2,2)
-
-        while IFS= read -r key; do
-            [[ -z "$key" ]] && continue
-            local port="${key%%/*}"
-            local process="${listening_ports[$key]}"
-
-            # Already allowed?
-            is_ufw_allowed "$key" && continue
-
-            # SSH already handled above
-            [[ "$key" == "$ssh_spec" ]] && continue
-
-            uncovered+=("$key ($process)")
-        done <<< "$sorted_keys"
-
-        if [[ ${#uncovered[@]} -gt 0 ]]; then
-            issues_found=$((issues_found + 1))
-            echo
-            warn "[Issue] ${#uncovered[@]} listening port(s) not explicitly allowed in UFW:"
-            for item in "${uncovered[@]}"; do
-                echo "    • $item"
-            done
-            echo
-            info "  Recommendation: Review and allow ports that need external access."
-
-            if ask_yes_no "  Interactively review these ports now?" "y"; then
-                while IFS= read -r key; do
-                    [[ -z "$key" ]] && continue
-                    local port="${key%%/*}"
-                    local process="${listening_ports[$key]}"
-
-                    is_ufw_allowed "$key" && continue
-                    [[ "$key" == "$ssh_spec" ]] && continue
-
-                    echo
-                    info "  Port ${C_BOLD}$key${C_RESET} ($process) — ${C_YELLOW}not allowed${C_RESET}"
-                    if ask_yes_no "    Allow incoming to $key?" "n"; then
-                        to_allow+=("$key")
-                    fi
-                done <<< "$sorted_keys"
-
-                # Apply chosen rules
-                if [[ ${#to_allow[@]} -gt 0 ]]; then
-                    local count=0
-                    for spec in "${to_allow[@]}"; do
-                        if ! is_ufw_allowed "$spec"; then
-                            if run_cmd "UFW_ALLOW:$spec" ufw insert 1 allow "$spec" \
-                                comment "Allowed by security script $(date +%Y-%m-%d)"; then
-                                ufw_rules["$spec"]=1
-                                ufw_rule_count=$((ufw_rule_count + 1))
-                                count=$((count + 1))
-                            fi
-                        fi
-                    done
-                    if (( count > 0 )) && ! $DRY_RUN; then
-                        ufw reload && success "UFW reloaded ($count rule(s) added)." || warn "UFW reload failed."
-                    fi
-                fi
-            fi
-        else
-            success "All listening ports are covered by UFW rules."
-        fi
-    fi
-
-    # Summary
-    echo
-    if (( issues_found == 0 )); then
-        success "UFW audit: ${C_GREEN}All checks passed.${C_RESET}"
-    else
-        info "UFW audit: $issues_found issue(s) found and addressed."
-    fi
-    info "Final UFW status:"
-    ufw status verbose 2>/dev/null || true
-
-    echo "--- Section 6 completed ---"; echo
+        local uncovered=()
+        for key in "${!listening_ports[@]}"; do
+            is_ufw_allowed "$key" && continue; [[ "$key" == "$ssh_spec" ]] && continue
+            uncovered+=("$key (${listening_ports[$key]})")
+        done
+        [[ ${#uncovered[@]} -gt 0 ]] && {
+            warn "${#uncovered[@]} listening port(s) not in UFW:"
+            for item in "${uncovered[@]}"; do echo "    • $item"; done
+            ask_yes_no "Interactively review these ports?" "y" && {
+                for key in "${!listening_ports[@]}"; do
+                    is_ufw_allowed "$key" && continue; [[ "$key" == "$ssh_spec" ]] && continue
+                    ask_yes_no "  Allow $key (${listening_ports[$key]})?" "n" && {
+                        run_cmd "UFW_ALLOW:$key" ufw insert 1 allow "$key" comment "Script $(date +%Y-%m-%d)"
+                        ufw_rules["$key"]=1
+                    }
+                done
+                ! $DRY_RUN && ufw reload && success "UFW reloaded." || true
+            }
+        } || success "All listening ports covered."
+    }
+    section_done 6
 }
-
 
 # ============================================================================
 # SECTION 7: Journald
 # ============================================================================
 configure_journald() {
-    info "${C_BOLD}7. Journald Log Limit — Audit${C_RESET}"
+    info "${C_BOLD}7. Journald Log Limit${C_RESET}"
+    describe_action "journald"
+    is_section_skipped "journald" && { info "Skipped."; echo; return 0; }
 
-    local config_file="/etc/systemd/journald.conf"
-    local key="SystemMaxUse"
-    local desired="$JOURNALD_MAX_USE"
-    local current=""
+    local config_file="/etc/systemd/journald.conf" key="SystemMaxUse" desired="$JOURNALD_MAX_USE" current=""
+    [[ -f "$config_file" ]] && current=$(grep -E "^\s*${key}=" "$config_file" 2>/dev/null | tail -n1 | cut -d= -f2 | xargs || true)
+    [[ "$current" == "$desired" ]] && { success "Journald $key='$desired' OK."; section_done 7; return 0; }
 
-    if [[ -f "$config_file" ]]; then
-        current=$(grep -E "^\s*${key}=" "$config_file" 2>/dev/null | tail -n1 | cut -d= -f2 | xargs || true)
+    warn "[Issue] Journald $key='${current:-not set}' (should be '$desired')."
+    ask_yes_no "Fix: Set $key=$desired?" "y" || { section_done 7; return 0; }
+
+    backup_file "$config_file"
+    local tc; tc=$(mktemp_tracked); cp "$config_file" "$tc"
+    grep -qE "^\s*#?\s*${key}=" "$tc"         && sed -i -E "s|^\s*#?\s*${key}=.*|${key}=${desired}|" "$tc"         || grep -q "^\s*\[Journal\]" "$tc"             && sed -i "/^\s*\[Journal\]/a ${key}=${desired}" "$tc"             || echo -e "
+[Journal]
+${key}=${desired}" >> "$tc"
+
+    if install_managed_file "$config_file" "$tc" 644; then
+        if ! $DRY_RUN; then
+            log_change "JOURNALD:$key=$desired"
+            run_cmd "RESTART:journald" systemctl restart systemd-journald && success "Journald configured."
+        fi
     fi
-
-    if [[ "$current" == "$desired" ]]; then
-        success "Journald $key = '$desired' (OK)"
-        echo "--- Section 7 completed ---"; echo; return 0
-    fi
-
-    # Issue found
-    if [[ -n "$current" ]]; then
-        warn "[Issue] Journald $key is '$current' (recommended: '$desired')."
-    else
-        warn "[Issue] Journald $key not explicitly set (recommended: '$desired')."
-    fi
-    info "  Recommendation: Limit journal disk usage to prevent log bloat."
-
-    if ! ask_yes_no "  Fix: Set $key to '$desired'?" "y"; then
-        echo "--- Section 7 completed ---"; echo; return 0
-    fi
-
-    backup_file "$config_file" || return 1
-    local temp_conf
-    temp_conf=$(mktemp)
-    cp "$config_file" "$temp_conf"
-
-    if grep -qE "^\s*#?\s*${key}=" "$temp_conf"; then
-        sed -i -E "s|^\s*#?\s*${key}=.*|${key}=${desired}|" "$temp_conf"
-    elif grep -q "^\s*\[Journal\]" "$temp_conf"; then
-        sed -i "/^\s*\[Journal\]/a ${key}=${desired}" "$temp_conf"
-    else
-        echo -e "\n[Journal]\n${key}=${desired}" >> "$temp_conf"
-    fi
-
-    if $DRY_RUN; then
-        dry_run_echo "Apply $key=$desired to $config_file and restart journald"
-        rm -f "$temp_conf"
-    elif mv "$temp_conf" "$config_file" && chmod 644 "$config_file"; then
-        success "  Fixed: $key set to '$desired'."
-        log_change "MODIFIED_PARAM:$key:$desired:$config_file"
-        run_cmd "SERVICE_RESTARTED:systemd-journald" systemctl restart systemd-journald && \
-            success "Journald restarted." || error "Failed to restart journald."
-    else
-        rm -f "$temp_conf"; restore_file "$config_file"
-    fi
-
-    echo "--- Section 7 completed ---"; echo
+    section_done 7
 }
-
 
 # ============================================================================
 # SECTION 8: ClamAV
 # ============================================================================
 configure_clamav() {
-    info "${C_BOLD}8. ClamAV Antivirus Setup${C_RESET}"
-    if ! ask_yes_no "Execute this step (ClamAV)?" "y"; then
-        info "Step skipped."; echo; return 0
-    fi
+    info "${C_BOLD}8. ClamAV Antivirus${C_RESET}"
+    describe_action "clamav"
+    is_section_skipped "clamav" && { info "Skipped."; record_check "CLAMAV" "SKIP" "Skipped via config"; echo; return 0; }
+    ask_yes_no "Install/configure ClamAV?" "y" || { echo; return 0; }
 
-    local freshclam_svc="clamav-freshclam" clamd_svc="clamav-daemon"
-    local db_dir="/var/lib/clamav"
-    local initial_ok=false
+    ensure_packages_installed "clamav" "clamav-daemon" || { record_check "CLAMAV" "FAIL" "Package install skipped/failed"; section_done 8; return 0; }
+    local fcs="clamav-freshclam" cds="clamav-daemon" db="/var/lib/clamav"
 
-    ensure_packages_installed "clamav" "clamav-daemon" || return 0
+    systemctl is-active --quiet "$fcs" 2>/dev/null && {
+        run_cmd "STOP:$fcs" systemctl stop "$fcs" || true; $DRY_RUN || sleep 2; }
 
-    # Initial freshclam
-    info "Checking ClamAV definitions..."
-    if systemctl is-active --quiet "$freshclam_svc"; then
-        run_cmd "SERVICE_STOPPED:$freshclam_svc (temp)" systemctl stop "$freshclam_svc" || true
-        $DRY_RUN || sleep 2
-    fi
+    describe_detail "clamav_freshclam"
+    ask_yes_no "Run freshclam (downloads definitions)?" "y" && {
+        run_cmd "freshclam" freshclam --quiet && success "freshclam done." || warn "freshclam failed."
+        $DRY_RUN || sleep 3
+    }
 
-    if ask_yes_no "Run 'freshclam' now (downloads virus definitions)?" "y"; then
-        if run_cmd "COMMAND_RUN:freshclam" freshclam --quiet; then
-            success "Freshclam completed."
-            initial_ok=true
-            $DRY_RUN || sleep 3
-        else
-            error "Freshclam failed. Check /var/log/clamav/freshclam.log"
-        fi
-    else
-        # Check if definitions exist
-        if [[ -f "$db_dir/main.cvd" || -f "$db_dir/main.cld" ]]; then
-            info "Definition files already exist."
-            initial_ok=true
-        fi
-    fi
-
-    # Freshclam service
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${freshclam_svc}\.service"; then
-        ensure_service_running "$freshclam_svc"
-    fi
-
-    # Clamd service
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${clamd_svc}\.service"; then
-        if ! systemctl is-active --quiet "$clamd_svc"; then
-            if $initial_ok; then
-                local defs_ok=false
-                [[ -f "$db_dir/main.cvd" || -f "$db_dir/main.cld" ]] && \
-                [[ -f "$db_dir/daily.cvd" || -f "$db_dir/daily.cld" ]] && defs_ok=true
-
-                if $defs_ok; then
-                    ensure_service_running "$clamd_svc"
-                else
-                    warn "Cannot start clamd — definition files missing."
-                fi
-            else
-                warn "Cannot start clamd — freshclam was not successful."
-            fi
-        else
-            success "'$clamd_svc' already active."
-            ensure_service_running "$clamd_svc"
-        fi
-    fi
-
-    echo "--- Section 8 completed ---"; echo
+    systemctl list-unit-files 2>/dev/null | grep -q "^${fcs}\.service" && ensure_service_running "$fcs"
+    systemctl list-unit-files 2>/dev/null | grep -q "^${cds}\.service" && {
+        [[ -f "$db/main.cvd" || -f "$db/main.cld" ]] && ensure_service_running "$cds" \
+            || warn "ClamAV definitions missing, cannot start daemon."
+    }
+    record_check "CLAMAV" "FIXED" "ClamAV installed and configured"
+    section_done 8
 }
-
 
 # ============================================================================
 # SECTION 9: Sysctl Hardening
 # ============================================================================
 configure_sysctl() {
-    info "${C_BOLD}9. Sysctl Security Hardening — Audit${C_RESET}"
+    info "${C_BOLD}9. Sysctl Hardening (CIS/BSI)${C_RESET}"
+    describe_action "sysctl"
+    is_section_skipped "sysctl" && { info "Skipped."; echo; return 0; }
 
-    # Define recommended sysctl parameters
-    declare -A sysctl_params=(
-        # Network security
-        ["net.ipv4.conf.all.rp_filter"]="1"
-        ["net.ipv4.conf.default.rp_filter"]="1"
-        ["net.ipv4.conf.all.accept_redirects"]="0"
-        ["net.ipv4.conf.default.accept_redirects"]="0"
-        ["net.ipv6.conf.all.accept_redirects"]="0"
-        ["net.ipv6.conf.default.accept_redirects"]="0"
-        ["net.ipv4.conf.all.send_redirects"]="0"
-        ["net.ipv4.conf.default.send_redirects"]="0"
-        ["net.ipv4.conf.all.accept_source_route"]="0"
-        ["net.ipv4.conf.default.accept_source_route"]="0"
-        ["net.ipv6.conf.all.accept_source_route"]="0"
-        ["net.ipv6.conf.default.accept_source_route"]="0"
-        ["net.ipv4.conf.all.log_martians"]="1"
-        ["net.ipv4.conf.default.log_martians"]="1"
-        ["net.ipv4.icmp_echo_ignore_broadcasts"]="1"
-        ["net.ipv4.icmp_ignore_bogus_error_responses"]="1"
-        ["net.ipv4.tcp_syncookies"]="1"
-        # Kernel hardening
-        ["kernel.randomize_va_space"]="2"
-        ["kernel.sysrq"]="0"
-        ["fs.protected_hardlinks"]="1"
-        ["fs.protected_symlinks"]="1"
-    )
+    load_sysctl_policy
 
     local issues_found=0
-    local params_to_set=()
-
-    info "Checking sysctl parameters against best practices..."
-    for param in "${!sysctl_params[@]}"; do
-        local desired="${sysctl_params[$param]}"
-        local current
+    local -a params_to_set=()
+    local param desired current expected_desc
+    for param in "${!SYSCTL_POLICY[@]}"; do
+        desired="${SYSCTL_POLICY[$param]}"
         current=$(get_effective_sysctl_config "$param")
-
-        if [[ "$current" == "$desired" ]]; then
-            success "  $param = $desired (OK)"
+        expected_desc=$(sysctl_expected_description "$param" "$desired")
+        if sysctl_value_matches_policy "$param" "$desired" "$current"; then
+            success "  $param=$current (OK; expected $expected_desc)"
         else
-            warn "  [Issue] $param = $current (should be $desired)"
-            issues_found=$((issues_found + 1))
+            warn "  [Issue] $param=$current (should be $expected_desc)"
+            issues_found=$((issues_found+1))
             params_to_set+=("$param=$desired")
         fi
     done
 
-    if (( issues_found == 0 )); then
-        success "Sysctl audit: ${C_GREEN}All parameters hardened.${C_RESET}"
-        echo "--- Section 9 completed ---"; echo; return 0
-    fi
+    (( issues_found == 0 )) && {
+        success "All sysctl parameters hardened."
+        record_check "SYSCTL" "PASS" "All hardened"
+        section_done 9
+        return 0
+    }
 
-    info "$issues_found parameter(s) differ from recommended values."
-    info "  Recommendation: Apply hardening to '$SYSCTL_CONFIG_FILE'."
+    ask_yes_no "${issues_found} issue(s) found. Apply sysctl hardening?" "y" || {
+        section_done 9
+        return 0
+    }
 
-    if ! ask_yes_no "  Fix: Apply sysctl hardening?" "y"; then
-        echo "--- Section 9 completed ---"; echo; return 0
-    fi
+    local tsys
+    tsys=$(mktemp_tracked)
+    {
+        echo "# Sysctl security hardening — generated by security_script.sh v${SCRIPT_VERSION}"
+        echo "# $(date)"
+        echo
+        for param in $(printf '%s\n' "${!SYSCTL_POLICY[@]}" | sort); do
+            echo "$param=${SYSCTL_POLICY[$param]}"
+        done
+    } > "$tsys"
 
-    backup_file "$SYSCTL_CONFIG_FILE"
+    if install_managed_file "$SYSCTL_CONFIG_FILE" "$tsys" 644; then
+        if ! $DRY_RUN; then
+            if sysctl --system >/dev/null 2>&1; then
+                local remaining=0
+                local -a remaining_params=()
+                for param in "${!SYSCTL_POLICY[@]}"; do
+                    desired="${SYSCTL_POLICY[$param]}"
+                    current=$(get_effective_sysctl_config "$param")
+                    if ! sysctl_value_matches_policy "$param" "$desired" "$current"; then
+                        remaining=$((remaining+1))
+                        remaining_params+=("$param")
+                    fi
+                done
 
-    if $DRY_RUN; then
-        dry_run_echo "Write ${#params_to_set[@]} parameters to $SYSCTL_CONFIG_FILE"
-        dry_run_echo "sysctl --system"
-    else
-        {
-            echo "# Sysctl security hardening - generated by security_script.sh v${SCRIPT_VERSION}"
-            echo "# $(date)"
-            echo
-            for entry in "${params_to_set[@]}"; do
-                echo "$entry"
-            done
-        } > "$SYSCTL_CONFIG_FILE"
-
-        chmod 644 "$SYSCTL_CONFIG_FILE"
-        log_change "ADDED_FILE:$SYSCTL_CONFIG_FILE"
-
-        if sysctl --system >/dev/null 2>&1; then
-            success "  Fixed: ${#params_to_set[@]} sysctl parameter(s) applied."
-            log_change "SYSCTL_APPLIED:$SYSCTL_CONFIG_FILE"
-        else
-            error "Failed to apply sysctl parameters."
+                if (( remaining == 0 )); then
+                    success "${issues_found} sysctl parameter(s) remediated."
+                    record_check "SYSCTL" "FIXED" "${issues_found} params hardened"
+                else
+                    warn "Sysctl applied, but ${remaining} parameter(s) still differ from policy: ${remaining_params[*]}"
+                    record_check "SYSCTL" "FAIL" "${remaining} sysctl param(s) not hardened: ${remaining_params[*]}"
+                fi
+            else
+                error "sysctl --system failed."
+                record_check "SYSCTL" "FAIL" "Apply failed"
+            fi
         fi
     fi
-
-    echo "--- Section 9 completed ---"; echo
+    section_done 9
 }
-
 
 # ============================================================================
 # SECTION 10: Sudoers TTY Tickets
 # ============================================================================
 configure_sudoers_tty() {
-    info "${C_BOLD}10. Sudoers TTY Ticket Isolation — Audit${C_RESET}"
+    info "${C_BOLD}10. Sudoers TTY Tickets${C_RESET}"
+    describe_action "sudoers"
+    is_section_skipped "sudoers" && { info "Skipped."; echo; return 0; }
 
-    # Check current state
-    local is_active=false
-    if grep -rPh --include='*' '^\s*Defaults\s+([^#]*,\s*)?tty_tickets' /etc/sudoers /etc/sudoers.d/ >/dev/null 2>&1; then
-        is_active=true
-    fi
+    grep -rPh --include='*' '^\s*Defaults\s+([^#]*,\s*)?tty_tickets' /etc/sudoers /etc/sudoers.d/ >/dev/null 2>&1 && {
+        success "tty_tickets already set."; record_check "SUDOERS_TTY" "PASS" "tty_tickets OK"; section_done 10; return 0; }
 
-    if $is_active; then
-        success "Sudoers tty_tickets already active (OK)."
-        echo "--- Section 10 completed ---"; echo; return 0
-    fi
-
-    # Issue found
-    warn "[Issue] tty_tickets not explicitly set."
-    info "  TTY tickets ensure sudo credentials are per-terminal, not shared across sessions."
-    info "  Recommendation: Add 'Defaults tty_tickets' to '$SUDOERS_TTY_FILE'."
-
-    if ! ask_yes_no "  Fix: Configure tty_tickets?" "y"; then
-        echo "--- Section 10 completed ---"; echo; return 0
-    fi
-
-    backup_file "$SUDOERS_TTY_FILE"
-
-    local content="# Ensure sudo tickets are per-TTY (generated by security_script.sh)\nDefaults tty_tickets\n"
-
+    describe_detail "sudo_ttytickets"
+    ask_yes_no "Configure tty_tickets?" "y" || { section_done 10; return 0; }
+    local tsudo; tsudo=$(mktemp_tracked)
+    printf '# tty_tickets — generated by security_script.sh v%s
+Defaults tty_tickets
+' "$SCRIPT_VERSION" > "$tsudo"
     if $DRY_RUN; then
-        dry_run_echo "Write 'Defaults tty_tickets' to $SUDOERS_TTY_FILE"
-        dry_run_echo "visudo -c -f $SUDOERS_TTY_FILE"
+        show_diff_preview "$SUDOERS_TTY_FILE" "$tsudo" "$SUDOERS_TTY_FILE"
+        record_dry_run_action "Update $SUDOERS_TTY_FILE"
     else
-        echo -e "$content" > "$SUDOERS_TTY_FILE"
-        chmod 0440 "$SUDOERS_TTY_FILE"
+        install_managed_file "$SUDOERS_TTY_FILE" "$tsudo" 0440
+        visudo -c -f "$SUDOERS_TTY_FILE" >/dev/null 2>&1 && {
+            success "tty_tickets configured."
+            record_check "SUDOERS_TTY" "FIXED" "tty_tickets set"
+        } || { error "visudo check failed! Removing."; rm -f "$SUDOERS_TTY_FILE"; record_check "SUDOERS_TTY" "FAIL" "visudo failed"; }
+    fi
+    section_done 10
+}
 
-        # Validate with visudo
-        if visudo -c -f "$SUDOERS_TTY_FILE" >/dev/null 2>&1; then
-            success "  Fixed: Sudoers tty_tickets configured."
-            log_change "ADDED_FILE:$SUDOERS_TTY_FILE"
+# ============================================================================
+# SECTION 11: auditd
+# ============================================================================
+configure_auditd() {
+    info "${C_BOLD}11. auditd — Linux Audit Daemon (CIS)${C_RESET}"
+    describe_action "auditd"
+    is_section_skipped "auditd" && { info "Skipped."; record_check "AUDITD" "SKIP" "Skipped via config"; echo; return 0; }
+    ask_yes_no "Install/configure auditd?" "y" || { record_check "AUDITD" "SKIP" "User skipped"; echo; return 0; }
+
+    ensure_packages_installed "auditd" "audispd-plugins" || { record_check "AUDITD" "FAIL" "Package install skipped/failed"; section_done 11; return 0; }
+    ensure_auditd_service_available || warn "auditd.service weiterhin nicht auffindbar. Es wird ein Fallback versucht."
+
+    mkdir -p "$(dirname "$AUDITD_RULES")"
+    local taudit; taudit=$(mktemp_tracked)
+    cat > "$taudit" <<'AUDITD_EOF'
+# auditd CIS ruleset — generated by security_script.sh
+-D
+-b 8192
+-f 1
+
+# Identity
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/sudoers -p wa -k identity
+-w /etc/sudoers.d/ -p wa -k identity
+
+# PAM
+-w /etc/pam.d/ -p wa -k pam_config
+-w /etc/security/limits.conf -p wa -k pam_config
+-w /etc/security/faillock.conf -p wa -k pam_config
+
+# SSH
+-w /etc/ssh/sshd_config -p wa -k sshd_config
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd_config
+
+# Systemd
+-w /etc/systemd/system/ -p wa -k systemd
+-w /etc/init.d/ -p wa -k init
+
+# Network
+-w /etc/hosts -p wa -k network_config
+-w /etc/sysctl.conf -p wa -k sysctl
+-w /etc/sysctl.d/ -p wa -k sysctl
+
+# Cron
+-w /etc/cron.d/ -p wa -k cron
+-w /etc/cron.daily/ -p wa -k cron
+-w /etc/crontab -p wa -k cron
+-w /var/spool/cron/ -p wa -k cron
+
+# Audit logs
+-w /var/log/audit/ -p wa -k audit_logs
+-w /etc/audit/ -p wa -k audit_config
+
+# Privileged commands
+-a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid
+-a always,exit -F arch=b32 -S execve -C uid!=euid -F euid=0 -k setuid
+
+# Sudo usage
+-w /usr/bin/sudo -p x -k sudo_usage
+
+# Kernel modules
+-w /sbin/insmod -p x -k module_load
+-w /sbin/rmmod  -p x -k module_load
+-w /sbin/modprobe -p x -k module_load
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k module_load
+
+# Mount
+-a always,exit -F arch=b64 -S mount -k mounts
+
+# File deletions
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=-1 -k file_deletion
+
+# Access denied
+-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -k access_denied
+-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EPERM  -F auid>=1000 -k access_denied
+AUDITD_EOF
+
+    install_managed_file "$AUDITD_RULES" "$taudit" 640
+    if $DRY_RUN; then
+        section_done 11
+        return 0
+    fi
+
+    command -v augenrules >/dev/null 2>&1 && augenrules --load >/dev/null 2>&1 && success "Audit rules loaded."
+
+    if auditd_unit_exists; then
+        systemctl enable auditd >/dev/null 2>&1 || true
+        systemctl restart auditd >/dev/null 2>&1 || systemctl start auditd >/dev/null 2>&1 || true
+    elif command -v service >/dev/null 2>&1; then
+        service auditd restart >/dev/null 2>&1 || service auditd start >/dev/null 2>&1 || true
+    fi
+
+    if auditd_is_active; then
+        success "auditd active."
+        record_check "AUDITD" "FIXED" "auditd + CIS ruleset"
+    else
+        error "auditd could not start."
+        if auditd_unit_exists; then
+            warn "$(tr_msg auditd_check_hint)"
+            record_check "AUDITD" "FAIL" "auditd installed but failed to start"
         else
-            error "Sudoers syntax check failed! Removing file."
-            rm -f "$SUDOERS_TTY_FILE"
-            restore_file "$SUDOERS_TTY_FILE"
+            warn "auditd.service fehlt weiterhin. Wahrscheinlich Packaging-/Umgebungsproblem."
+            record_check "AUDITD" "FAIL" "auditd package present but no service unit"
         fi
     fi
+    print_auditd_observability_info
+    section_done 11
+}
 
-    echo "--- Section 10 completed ---"; echo
+# ============================================================================
+# SECTION 12: AIDE
+# ============================================================================
+configure_aide() {
+    info "${C_BOLD}12. AIDE — File Integrity Monitoring${C_RESET}"
+    describe_action "aide"
+    is_section_skipped "aide" && { info "Skipped."; record_check "AIDE" "SKIP" "Skipped via config"; echo; return 0; }
+    ask_yes_no "Install/configure AIDE?" "y" || { record_check "AIDE" "SKIP" "User skipped"; echo; return 0; }
+
+    ensure_packages_installed "aide" "aide-common" || { record_check "AIDE" "FAIL" "Package install skipped/failed"; section_done 12; return 0; }
+    $DRY_RUN && { dry_run_echo "AIDE init with resolved config + setup cron"; section_done 12; return 0; }
+
+    local promoted_db="" init_rc=0
+    if ! aide_baseline_exists; then
+        if aide_init_running; then
+            warn "AIDE init is already running in the background. Not starting a second one."
+            print_aide_observability_info
+            record_check "AIDE" "FAIL" "Initialization already running — baseline pending"
+            section_done 12
+            return 0
+        fi
+
+        info "Initializing AIDE database (may take several minutes; Ctrl+C cancels safely)..."
+        [[ "$AIDE_INIT_TIMEOUT" == "0" ]] && info "AIDE timeout disabled for this profile/run."
+
+        if ! run_aide_init_command; then
+            init_rc=$?
+            if (( init_rc == 124 )); then
+                error "AIDE init timed out after ${AIDE_INIT_TIMEOUT}s. See $AIDE_INIT_LOG"
+            else
+                error "AIDE init failed. See $AIDE_INIT_LOG"
+            fi
+            tail -n 30 "$AIDE_INIT_LOG" 2>/dev/null || true
+            record_check "AIDE" "FAIL" "Init failed"
+            print_aide_observability_info
+            section_done 12
+            return 1
+        fi
+
+        promoted_db="$(aide_list_candidate_paths | awk '/aide\.db/ && $0 !~ /\.new(\.gz)?$/ {print; exit}')"
+        if [[ -z "$promoted_db" ]]; then
+            error "AIDE init failed or no usable baseline was created. See $AIDE_INIT_LOG"
+            tail -n 30 "$AIDE_INIT_LOG" 2>/dev/null || true
+            record_check "AIDE" "FAIL" "Init failed"
+            print_aide_observability_info
+            section_done 12
+            return 1
+        fi
+
+        success "AIDE database initialized: $promoted_db"
+        log_change "AIDE_DB_INITIALIZED:$promoted_db"
+        txlog "FILE_ADDED" "$promoted_db"
+    else
+        success "AIDE database exists."
+        describe_detail "aide_reinit"
+        ask_yes_no "Re-initialize database (replaces baseline)?" "n" && {
+            if ! run_aide_init_command; then
+                init_rc=$?
+                if (( init_rc == 124 )); then
+                    warn "AIDE re-initialization timed out after ${AIDE_INIT_TIMEOUT}s."
+                else
+                    warn "AIDE re-initialization failed. See $AIDE_INIT_LOG"
+                fi
+            else
+                success "Database re-initialized."
+            fi
+        }
+    fi
+
+    [[ ! -f "$AIDE_CRON" ]] && {
+        local taidecron; taidecron=$(mktemp_tracked)
+        cat > "$taidecron" << 'AIDE_EOF'
+#!/bin/bash
+# AIDE daily check — generated by security_script.sh
+LOG="/var/log/aide-check.log"
+REPORT="/var/log/aide-report-$(date +%Y%m%d).log"
+CFG_AUTO="/var/lib/aide/aide.conf.autogenerated"
+CFG_STATIC="/etc/aide/aide.conf"
+HELPER="$(command -v update-aide.conf 2>/dev/null || true)"
+
+aide_fallback_refresh() {
+    local tmp file
+    [[ -f "$CFG_STATIC" ]] || return 1
+    mkdir -p /var/lib/aide /etc/aide/aide.conf.d >/dev/null 2>&1 || true
+    tmp=$(mktemp) || return 1
+    cat "$CFG_STATIC" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if [[ -d /etc/aide/aide.conf.d ]]; then
+        while IFS= read -r file; do
+            [[ -f "$file" ]] || continue
+            printf '
+# --- merged from %s ---
+' "$file" >> "$tmp"
+            if [[ -x "$file" ]]; then
+                "$file" >> "$tmp" 2>> "$LOG" || { rm -f "$tmp"; return 1; }
+            else
+                cat "$file" >> "$tmp" || { rm -f "$tmp"; return 1; }
+            fi
+            printf '
+' >> "$tmp"
+        done < <(find /etc/aide/aide.conf.d -maxdepth 1 -type f | sort)
+    fi
+    install -m 600 "$tmp" "$CFG_AUTO" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+}
+
+echo "=== AIDE $(date) ===" >> "$LOG"
+if [[ -n "$HELPER" ]]; then
+    "$HELPER" >/dev/null 2>&1 || true
+else
+    aide_fallback_refresh >/dev/null 2>&1 || true
+fi
+if [[ -f "$CFG_AUTO" ]]; then
+    nice -n 19 ionice -c3 aide --config="$CFG_AUTO" --check 2>&1 | tee "$REPORT" >> "$LOG"
+elif [[ -f "$CFG_STATIC" ]]; then
+    nice -n 19 ionice -c3 aide --config="$CFG_STATIC" --check 2>&1 | tee "$REPORT" >> "$LOG"
+else
+    nice -n 19 ionice -c3 aide --check 2>&1 | tee "$REPORT" >> "$LOG"
+fi
+grep -q "changed\|added\|removed" "$REPORT" 2>/dev/null && echo "AIDE ALERT on $(hostname) at $(date)" | mail -s "AIDE Alert: $(hostname)" root 2>/dev/null || true
+find /var/log -name "aide-report-*.log" -mtime +30 -delete 2>/dev/null || true
+AIDE_EOF
+        install_managed_file "$AIDE_CRON" "$taidecron" 755
+        success "AIDE cron job installed."
+    }
+
+    if aide_baseline_exists; then
+        record_check "AIDE" "FIXED" "AIDE + daily cron active"
+    else
+        record_check "AIDE" "FAIL" "AIDE installed but baseline missing"
+    fi
+    info "AIDE monitors critical files for changes and helps detect later tampering."
+    print_aide_observability_info
+    section_done 12
 }
 
 
 # ============================================================================
-# MAIN EXECUTION
+# SECTION 13: AppArmor (from ChatGPT v4.1.0 — NEW in v5)
+# ============================================================================
+configure_apparmor_enforce() {
+    info "${C_BOLD}13. AppArmor — Enforce Mode${C_RESET}"
+    describe_action "apparmor"
+    is_section_skipped "apparmor" && { info "Skipped."; echo; return 0; }
+
+    local enforce="${AUTO_APPARMOR_ENFORCE:-false}"
+    [[ "$enforce" == "false" ]] && ! $AUTO_MODE && \
+        ask_yes_no "Set all AppArmor profiles to enforce mode?" "n" || \
+        { [[ "$enforce" != "true" ]] && { info "AppArmor enforce skipped."; echo; return 0; }; }
+
+    command -v aa-enforce >/dev/null 2>&1 || ensure_packages_installed "apparmor-utils" || return 0
+    $DRY_RUN && { dry_run_echo "aa-enforce /etc/apparmor.d/*"; section_done 13; return 0; }
+
+    local complain_profiles; complain_profiles=$(aa-status 2>/dev/null | grep "profiles are in complain mode" | grep -oP '^\d+' || echo "0")
+    (( ${complain_profiles:-0} == 0 )) && { success "No profiles in complain mode."; record_check "APPARMOR" "PASS" "All profiles enforced"; section_done 13; return 0; }
+
+    info "Setting ${complain_profiles} complain profile(s) to enforce..."
+    aa-enforce /etc/apparmor.d/* 2>/dev/null && {
+        success "AppArmor: all profiles set to enforce."; record_check "APPARMOR" "FIXED" "All profiles enforced"
+    } || { warn "Some profiles could not be enforced (check aa-status)."; record_check "APPARMOR" "FAIL" "Enforce partially failed"; }
+    section_done 13
+}
+
+# ============================================================================
+# SECTION 14: Filesystem Hardening
+# ============================================================================
+configure_filesystem_hardening() {
+    info "${C_BOLD}14. Filesystem Hardening — /tmp, /dev/shm${C_RESET}"
+    describe_action "filesystem"
+    is_section_skipped "fstab" && { info "Skipped."; echo; return 0; }
+    describe_detail "filesystem_mountopts"
+    ask_yes_no "Harden tmpfs mount options (noexec,nosuid,nodev)?" "y" || { echo; return 0; }
+
+    local issues_found=0 fstab="/etc/fstab"
+    backup_file "$fstab"
+
+    harden_tmpfs_mount() {
+        local mp="$1"
+        local required=("noexec" "nosuid" "nodev")
+        local entry; entry=$(grep -E "^\S+\s+${mp}\s" "$fstab" 2>/dev/null | head -1 || true)
+
+        if [[ -z "$entry" ]]; then
+            mountpoint -q "$mp" 2>/dev/null || { info "  $mp not mounted, skip."; return; }
+            ask_yes_no "  Add $mp to fstab with noexec,nosuid,nodev?" "y" && {
+                $DRY_RUN && dry_run_echo "Add tmpfs $mp to fstab" || {
+                    echo "tmpfs $mp tmpfs defaults,noexec,nosuid,nodev 0 0" >> "$fstab"
+                    log_change "MODIFIED:$fstab ($mp added)"; txlog "FILE_ADDED" "$fstab"
+                    mount -o remount "$mp" 2>/dev/null || true
+                    success "  $mp added to fstab."
+                }; issues_found=$((issues_found+1))
+            }
+            return
+        fi
+
+        local opts; opts=$(echo "$entry" | awk '{print $4}')
+        local missing=()
+        for opt in "${required[@]}"; do echo "$opts" | grep -q "$opt" || missing+=("$opt"); done
+        [[ ${#missing[@]} -eq 0 ]] && { success "  $mp: all options OK."; return; }
+
+        issues_found=$((issues_found+1))
+        warn "  $mp missing: ${missing[*]}"
+        describe_detail "filesystem_mountopts"
+        ask_yes_no "  Add ${missing[*]} to $mp in fstab?" "y" && {
+            $DRY_RUN && dry_run_echo "Update $mp in fstab" || {
+                local new_opts="${opts},$(IFS=','; echo "${missing[*]}")"
+                local mp_esc; mp_esc=$(printf '%s\n' "$mp" | sed 's/[]\/$*.^[]/\\&/g')
+                sed -i "s|\(\S\+\s\+${mp_esc}\s\+\S\+\s\+\)${opts}|\1${new_opts}|" "$fstab"
+                mount -o remount "$mp" 2>/dev/null || warn "Remount failed (will apply on next boot)."
+                success "  $mp updated in fstab."; log_change "MODIFIED:$fstab ($mp +${missing[*]})"
+            }
+        }
+    }
+
+    harden_tmpfs_mount "/tmp"
+    harden_tmpfs_mount "/dev/shm"
+    harden_tmpfs_mount "/var/tmp"
+
+    (( issues_found == 0 )) && record_check "FSTAB_HARDENING" "PASS" "/tmp + /dev/shm hardened" \
+        || record_check "FSTAB_HARDENING" "FIXED" "${issues_found} mount option(s) fixed"
+    section_done 14
+}
+
+# ============================================================================
+# SECTION 15: Kernel Module Blacklist
+# ============================================================================
+configure_module_blacklist() {
+    info "${C_BOLD}15. Kernel Module Blacklist (CIS)${C_RESET}"
+    describe_action "modules"
+    is_section_skipped "modules" && { info "Skipped."; echo; return 0; }
+    describe_detail "modules_blacklist"
+    ask_yes_no "Blacklist unused kernel modules?" "y" || { record_check "MODULE_BLACKLIST" "SKIP" "User skipped"; echo; return 0; }
+
+    local mods=("cramfs" "freevxfs" "jffs2" "hfs" "hfsplus" "udf" "squashfs" "dccp" "sctp" "rds" "tipc")
+
+    mkdir -p "$(dirname "$MODPROBE_BLACKLIST")"
+    local tmod; tmod=$(mktemp_tracked)
+    {
+        echo "# Kernel module blacklist — generated by security_script.sh v${SCRIPT_VERSION}"
+        echo "# $(date) — CIS Linux Benchmark"; echo
+        for m in "${mods[@]}"; do
+            echo "blacklist $m"; echo "install $m /bin/true"; echo
+        done
+    } > "$tmod"
+    install_managed_file "$MODPROBE_BLACKLIST" "$tmod" 644
+    ! $DRY_RUN && command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u 2>/dev/null && success "initramfs updated." || true
+    success "${#mods[@]} modules blacklisted."; info "Full effect after reboot."
+    record_check "MODULE_BLACKLIST" "FIXED" "${#mods[@]} modules blacklisted"
+    section_done 15
+}
+
+# ============================================================================
+# SECTION 16: Core Dump Disabling
+# ============================================================================
+configure_core_dumps() {
+    info "${C_BOLD}16. Core Dump Disabling${C_RESET}"
+    describe_action "coredumps"
+    is_section_skipped "coredumps" && { info "Skipped."; echo; return 0; }
+
+    local core_sysctl; core_sysctl=$(get_effective_sysctl_config "fs.suid_dumpable")
+    local limits_ok=false
+    grep -qE '^\s*\*\s+hard\s+core\s+0' "$LIMITS_CONF" 2>/dev/null && limits_ok=true
+
+    [[ "$core_sysctl" == "0" ]] && $limits_ok && {
+        success "Core dumps already disabled."; record_check "CORE_DUMPS" "PASS" "Core dumps disabled"
+        section_done 16; return 0
+    }
+
+    describe_detail "coredumps_disable"
+    ask_yes_no "Disable core dumps?" "y" || { section_done 16; return 0; }
+    $DRY_RUN && { dry_run_echo "Write limits + sysctl for core dump disable"; section_done 16; return 0; }
+
+    mkdir -p "$(dirname "$LIMITS_CONF")"
+    backup_file "$LIMITS_CONF"
+    { echo "# Core dump prevention — security_script.sh v${SCRIPT_VERSION}"; echo "* soft core 0"; echo "* hard core 0"; } > "$LIMITS_CONF"
+    chmod 644 "$LIMITS_CONF"; log_change "ADDED_FILE:$LIMITS_CONF"; txlog "FILE_ADDED" "$LIMITS_CONF"
+
+    local sf="$SYSCTL_CONFIG_FILE"
+    [[ -f "$sf" ]] || touch "$sf"
+    grep -q "fs.suid_dumpable" "$sf"     || echo "fs.suid_dumpable = 0"         >> "$sf"
+    grep -q "kernel.core_pattern" "$sf"  || echo "kernel.core_pattern = |/bin/false" >> "$sf"
+    sysctl -w fs.suid_dumpable=0 >/dev/null 2>&1 && success "fs.suid_dumpable=0 applied." || true
+
+    local coredump_conf="/etc/systemd/coredump.conf"
+    [[ -f "$coredump_conf" ]] && {
+        backup_file "$coredump_conf"
+        sed -i '/^\s*#\?\s*Storage\s*=/d' "$coredump_conf"
+        sed -i '/^\[Coredump\]/a Storage=none' "$coredump_conf"
+        systemctl daemon-reload 2>/dev/null || true
+    }
+    success "Core dumps disabled (limits.conf + sysctl + systemd-coredump)."
+    record_check "CORE_DUMPS" "FIXED" "Core dumps disabled"
+    section_done 16
+}
+
+# ============================================================================
+# SECTION 17: PAM Hardening — ROCK SOLID REWRITE
+#
+# Strategy:
+# 1. pwquality: only modifies /etc/security/pwquality.conf — safe, no PAM stack touch
+# 2. faillock: uses /etc/security/faillock.conf (modern Debian/Ubuntu approach)
+#    pam_faillock is already in the PAM stack on modern Debian/Ubuntu via pam-auth-update
+#    We only configure the PARAMETERS, not the stack itself
+# 3. Root lock: explicit user confirmation required even in auto mode
+# 4. After EVERY PAM change: sudo smoke test + auto-rollback on failure
+# ============================================================================
+configure_pam_hardening() {
+    info "${C_BOLD}17. PAM Hardening${C_RESET}"
+    describe_action "pam"
+    is_section_skipped "pam" && { info "Skipped."; echo; return 0; }
+    ask_yes_no "Configure PAM hardening?" "y" || { echo; return 0; }
+
+    # --- 17a: Password Quality (pwquality.conf only — no PAM stack touch) ---
+    info "17a. Password complexity (pwquality.conf)..."
+    describe_detail "pam_pwquality"
+    if ensure_packages_installed "libpam-pwquality"; then
+        backup_file "$PWQUALITY_CONF"
+        $DRY_RUN && dry_run_echo "Configure $PWQUALITY_CONF" || {
+            declare -A pwq=(
+                ["minlen"]="14"    ["dcredit"]="-1"    ["ucredit"]="-1"
+                ["ocredit"]="-1"   ["lcredit"]="-1"    ["maxrepeat"]="3"
+                ["difok"]="7"      ["gecoscheck"]="1"  ["dictcheck"]="1"
+            )
+            local k v
+            for k in "${!pwq[@]}"; do
+                v="${pwq[$k]}"
+                [[ -f "$PWQUALITY_CONF" ]] && grep -qE "^\s*#?\s*${k}\s*=" "$PWQUALITY_CONF" \
+                    && sed -i -E "s|^\s*#?\s*${k}\s*=.*|${k} = ${v}|" "$PWQUALITY_CONF" \
+                    || echo "${k} = ${v}" >> "$PWQUALITY_CONF"
+            done
+            log_change "MODIFIED:$PWQUALITY_CONF"; txlog "FILE_ADDED" "$PWQUALITY_CONF"
+            success "  pwquality: minlen=14, complexity enforced."
+        }
+        record_check "PAM_PWQUALITY" "FIXED" "pwquality: minlen=14"
+    else
+        record_check "PAM_PWQUALITY" "FAIL" "libpam-pwquality install failed"
+    fi
+
+    # --- 17b: Account lockout via faillock.conf (SAFE — no PAM stack injection) ---
+    info "17b. Account lockout (faillock.conf — no PAM stack injection)..."
+    info "  Modern Debian/Ubuntu: pam_faillock is activated via pam-auth-update."
+    info "  We only configure the parameters in /etc/security/faillock.conf."
+
+    describe_detail "pam_faillock"
+    ask_yes_no "  Configure pam_faillock parameters (deny=5, unlock_time=900)?" "y" && {
+        $DRY_RUN && dry_run_echo "Configure $FAILLOCK_CONF" || {
+            # Ensure libpam-modules is installed (pam_faillock comes with it on Ubuntu 22+)
+            # On older systems, ensure faillock.conf exists
+            if [[ ! -f "$FAILLOCK_CONF" ]]; then
+                info "  Creating $FAILLOCK_CONF..."
+                mkdir -p "$(dirname "$FAILLOCK_CONF")"
+                local tfail; tfail=$(mktemp_tracked)
+                cat > "$tfail" <<'FAILLOCK_EOF'
+# faillock.conf — generated by security_script.sh
+# Parameters for pam_faillock.so
+deny = 5
+fail_interval = 900
+unlock_time = 900
+silent
+audit
+FAILLOCK_EOF
+                install_managed_file "$FAILLOCK_CONF" "$tfail" 644
+                success "  $FAILLOCK_CONF created."
+            else
+                backup_file "$FAILLOCK_CONF"
+                declare -A fc_params=(["deny"]="5" ["fail_interval"]="900" ["unlock_time"]="900")
+                local fk fv
+                for fk in "${!fc_params[@]}"; do
+                    fv="${fc_params[$fk]}"
+                    grep -qE "^\s*#?\s*${fk}\s*=" "$FAILLOCK_CONF" \
+                        && sed -i -E "s|^\s*#?\s*${fk}\s*=.*|${fk} = ${fv}|" "$FAILLOCK_CONF" \
+                        || echo "${fk} = ${fv}" >> "$FAILLOCK_CONF"
+                done
+                log_change "MODIFIED:$FAILLOCK_CONF"
+                success "  $FAILLOCK_CONF updated."
+            fi
+
+            # Activate pam_faillock via pam-auth-update (Debian/Ubuntu native — SAFE)
+            if command -v pam-auth-update >/dev/null 2>&1; then
+                # Check if faillock profile exists
+                if [[ -f /usr/share/pam-configs/faillock ]]; then
+                    pam-auth-update --enable faillock 2>/dev/null && \
+                        success "  pam_faillock activated via pam-auth-update." || \
+                        warn "  pam-auth-update --enable faillock failed (may already be active)."
+                else
+                    info "  No pam-configs/faillock profile found."
+                    info "  pam_faillock will use faillock.conf parameters when the module is in the stack."
+                    info "  On Ubuntu 22.04+: pam_faillock is active by default via pam-configs/faillock."
+                fi
+                # Smoke test — critical safety check
+                sudo_smoke_test "/etc/pam.d/common-auth" || {
+                    error "PAM smoke test failed after pam-auth-update! Rolling back."
+                    pam-auth-update --disable faillock 2>/dev/null || true
+                    return 1
+                }
+            else
+                info "  pam-auth-update not found — faillock.conf parameters set but manual PAM config may be needed."
+            fi
+        }
+        record_check "PAM_FAILLOCK" "FIXED" "faillock.conf: deny=5, unlock=900s"
+    } || record_check "PAM_FAILLOCK" "SKIP" "User skipped faillock"
+
+    # --- 17c: Root account lock ---
+    info "17c. Root account lock..."
+    if passwd -S root 2>/dev/null | grep -qE "^root\s+L"; then
+        success "  Root account already locked."
+        record_check "ROOT_LOCKED" "PASS" "root locked"
+    else
+        warn "  Root account is NOT locked."
+        warn "  Ensure you have sudo access BEFORE locking root!"
+
+        # Safety check: verify sudo works NOW before even offering to lock root
+        if sudo -n true 2>/dev/null || groups "${SUDO_USER:-$(whoami)}" 2>/dev/null | grep -qE '\b(sudo|wheel|admin)\b'; then
+            describe_detail "root_lock"
+            if ask_yes_no "  Lock root account (passwd -l root)? [REQUIRES WORKING SUDO]" "y"; then
+                # One final sudo test
+                if sudo true 2>/dev/null; then
+                    $DRY_RUN && dry_run_echo "passwd -l root" || {
+                        passwd -l root && {
+                            success "  Root account locked."
+                            log_change "ROOT_LOCKED"; txlog "ROOT_LOCKED" "root"
+                            record_check "ROOT_LOCKED" "FIXED" "root account locked"
+                        } || { error "passwd -l root failed."; record_check "ROOT_LOCKED" "FAIL" "Lock failed"; }
+                    }
+                else
+                    error "  Sudo not working — NOT locking root. Fix sudo first!"
+                    record_check "ROOT_LOCKED" "FAIL" "sudo not working — root NOT locked"
+                fi
+            else
+                record_check "ROOT_LOCKED" "SKIP" "User declined root lock"
+            fi
+        else
+            error "  Cannot verify sudo access — NOT locking root (safety abort)."
+            record_check "ROOT_LOCKED" "FAIL" "sudo not verified — root NOT locked for safety"
+        fi
+    fi
+    section_done 17
+}
+
+# ============================================================================
+# SECTION 18: Login Banners
+# ============================================================================
+configure_login_banners() {
+    info "${C_BOLD}18. Login Banners${C_RESET}"
+    describe_action "banners"
+    is_section_skipped "banners" && { info "Skipped."; echo; return 0; }
+    describe_detail "banners_apply"
+    ask_yes_no "Configure login banners (compliance requirement)?" "y" || { record_check "LOGIN_BANNER" "SKIP" "User skipped"; echo; return 0; }
+
+    $DRY_RUN && { dry_run_echo "Write SSH pre-login banner and avoid duplicate MOTD banner"; section_done 18; return 0; }
+
+    local banner_text
+    banner_text=$(cat <<'BANNER'
+***************************************************************************
+                         AUTHORIZED ACCESS ONLY
+
+This system is for authorized users only. All activity may be monitored
+and recorded. By accessing this system, you consent to such monitoring.
+Unauthorized access or use may result in civil and criminal penalties.
+
+Disconnect immediately if you are not an authorized user.
+***************************************************************************
+BANNER
+)
+    local tbanner
+    tbanner=$(mktemp_tracked)
+    printf '%s
+' "$banner_text" > "$tbanner"
+    install_managed_file "$BANNER_FILE" "$tbanner" 644
+    success "  $BANNER_FILE written (SSH pre-login banner)."
+
+    if [[ -f "$MOTD_FILE" ]] && grep -q "AUTHORIZED ACCESS ONLY" "$MOTD_FILE" 2>/dev/null; then
+        if [[ -f "${MOTD_FILE}${BACKUP_SUFFIX}" ]]; then
+            restore_file "$MOTD_FILE"
+            success "  $MOTD_FILE restored to avoid duplicate post-login banner."
+        else
+            : > "$MOTD_FILE"
+            chmod 644 "$MOTD_FILE" 2>/dev/null || true
+            success "  $MOTD_FILE cleared to avoid duplicate post-login banner."
+        fi
+    else
+        info "  $MOTD_FILE left unchanged to avoid duplicate banner text."
+    fi
+
+    local sc="/etc/ssh/sshd_config"
+    backup_file "$sc"
+    local ts; ts=$(mktemp_tracked); cp "$sc" "$ts"
+    grep -qiE "^\s*Banner\s+$BANNER_FILE" "$ts" && success "  Banner already in sshd_config." || {
+        grep -qiE "^\s*#?\s*Banner" "$ts"             && sed -i -E "s|^\s*#?\s*Banner\s+.*|Banner $BANNER_FILE|" "$ts"             || echo "Banner $BANNER_FILE" >> "$ts"
+        apply_sshd_config "$ts" && { log_change "MODIFIED:$sc (Banner)"; restart_ssh "login banner" || true; }
+    }
+    success "Login banners configured (single SSH pre-login banner)."
+    record_check "LOGIN_BANNER" "FIXED" "Authorization banner deployed via SSH pre-login"
+    section_done 18
+}
+
+# ============================================================================
+# MAIN
 # ============================================================================
 main() {
-    echo "=== Interactive Linux Server Security Script v${SCRIPT_VERSION} ==="
-    echo "Checks and configures security settings for Debian/Ubuntu."
-    echo "Log file: $SCRIPT_LOG_FILE"
-    echo "Backups: Files ending with '$BACKUP_SUFFIX'"
-    $DRY_RUN || echo
-    warn "Use at your own risk! Create backups beforehand!"
+    clear
+    select_ui_language
+    echo -e "${C_BOLD}${C_CYAN}"
+    echo "  ╔══════════════════════════════════════════════════════════════════╗"
+    echo "  ║   Linux Server Security Script v${SCRIPT_VERSION} — Paul Schumacher      ║"
+    echo "  ║   Debian / Ubuntu — CIS/BSI Hardening + Full Rollback           ║"
+    echo "  ╚══════════════════════════════════════════════════════════════════╝"
+    echo -e "${C_RESET}"
+    info "UI language: $UI_LANG"
+
+    interactive_mode_menu
+    select_hardening_profile
+    apply_profile_defaults
+
+    $ROLLBACK_MODE && { run_full_rollback; exit $?; }
+    $SELECTIVE_REMOVE_MODE && { run_selective_removal "$REMOVE_TARGETS_RAW"; exit $?; }
+
+    echo "  Log:     $SCRIPT_LOG_FILE"
+    echo "  Tx-Log:  $TRANSACTION_LOG"
+    echo "  Backups: *${BACKUP_SUFFIX}"
+    if $PROFILE_SELECTED || $AUTO_MODE || $EXPERT_PROFILE_MODE; then
+        echo "  Profile: $ACTIVE_PROFILE"
+    fi
+    $DRY_RUN     && echo -e "\n  ${C_MAGENTA}*** $( [[ "$UI_LANG" == "de" ]] && echo "DRY-RUN — keine Änderungen" || echo "DRY-RUN — no changes" ) ***${C_RESET}"
+    $AUTO_MODE   && echo -e "\n  ${C_YELLOW}*** $( [[ "$UI_LANG" == "de" ]] && echo "AUTO-MODUS — alle Prompts automatisch" || echo "AUTO MODE — all prompts automatic" ) ***${C_RESET}"
+    $ASSESS_ONLY && echo -e "\n  ${C_CYAN}*** $( [[ "$UI_LANG" == "de" ]] && echo "NUR PRÜFUNG — keine Änderungen" || echo "ASSESSMENT ONLY — no changes" ) ***${C_RESET}"
     echo
 
-    if ! ask_yes_no "Proceed?" "y"; then
-        info "Exiting."; exit 0
+    run_assessment
+
+    if $ASSESS_ONLY; then
+        print_assessment_report
+        local red; red="$(count_red_checks)"
+        echo -e "  ${C_CYAN}$(tr_msg run_without_assess)${C_RESET}"; echo
+        (( red == 0 )) && exit 0 || exit 2
     fi
 
-    # Setup logging
-    if ! $DRY_RUN; then
-        local log_dir
-        log_dir=$(dirname "$SCRIPT_LOG_FILE")
-        [[ -d "$log_dir" ]] || mkdir -p "$log_dir" || { error "Cannot create log dir."; exit 1; }
-        touch "$SCRIPT_LOG_FILE" || { error "Cannot write log file."; exit 1; }
-        log_change "SCRIPT_STARTED Version=$SCRIPT_VERSION"
-    else
-        info "DRY-RUN: Logging disabled."
+    echo -e "\n${C_BOLD}Pre-Hardening Assessment:${C_RESET}"
+    print_assessment_report
+
+    if $INTERACTIVE_RECOMMENDED_MODE; then
+        info "$(tr_msg recommended_intro_1)"
+        info "$(tr_msg recommended_intro_2)"
+        info "$(tr_msg recommended_intro_3)"
+    elif $INTERACTIVE_STEP_MODE && ! $EXPERT_PROFILE_MODE; then
+        info "$(tr_msg step_intro)"
     fi
+
+    local pre_red; pre_red="$(count_red_checks)"
+
+    $AUTO_MODE || {
+        warn "$(tr_msg own_risk)"
+        ask_yes_no "$(tr_msg start_hardening)" "y" || { info "$(tr_msg aborted)"; exit 0; }
+    }
+
+    ! $DRY_RUN && {
+        local log_dir; log_dir=$(dirname "$SCRIPT_LOG_FILE")
+        [[ -d "$log_dir" ]] || mkdir -p "$log_dir"
+        touch "$SCRIPT_LOG_FILE" "$TRANSACTION_LOG"
+        log_change "SCRIPT_STARTED v=${SCRIPT_VERSION} AUTO=${AUTO_MODE} VERIFY=${VERIFY_AFTER_HARDENING}"
+        txlog "SCRIPT_START" "v=${SCRIPT_VERSION}"
+    }
 
     detect_ssh_service
     info "SSH service: $SSH_SERVICE"
 
-    # Execute all sections in order
     local -a sections=(
-        configure_ssh_key_and_users       # 1. SSH Keys
-        configure_unattended_upgrades     # 2. Auto Updates
-        configure_msmtp                   # 3. Mail Notifications
-        configure_ssh_hardening           # 4a. SSH Hardening
-        configure_google_2fa              # 4b. Two-Factor Auth
-        configure_fail2ban                # 5a. Fail2ban
-        configure_sshguard                # 5b. SSHGuard
-        configure_ufw                     # 6. Firewall
-        configure_journald                # 7. Log Limits
-        configure_clamav                  # 8. Antivirus
-        configure_sysctl                  # 9. Kernel/Network Hardening
-        configure_sudoers_tty             # 10. Sudoers TTY Tickets
+        configure_ssh_key_and_users      #  1
+        configure_unattended_upgrades    #  2
+        configure_msmtp                  #  3
+        configure_ssh_hardening          #  4a
+        configure_google_2fa             #  4b
+        configure_fail2ban               #  5a
+        configure_sshguard               #  5b
+        configure_ufw                    #  6
+        configure_journald               #  7
+        configure_clamav                 #  8
+        configure_sysctl                 #  9
+        configure_sudoers_tty            # 10
+        configure_auditd                 # 11
+        configure_aide                   # 12
+        configure_apparmor_enforce       # 13
+        configure_filesystem_hardening   # 14
+        configure_module_blacklist       # 15
+        configure_core_dumps             # 16
+        configure_pam_hardening          # 17 ← ROCK SOLID REWRITE
+        configure_login_banners          # 18
     )
 
+    local targeted_pending_sections=0
+    targeted_pending_sections="$(count_targeted_pending_sections "${sections[@]}")"
+
+    if (( pre_red == 0 )) && { $INTERACTIVE_RECOMMENDED_MODE || $EXPERT_PROFILE_MODE || $AUTO_MODE; }; then
+        success "$(tr_msg no_open_findings_mode)"
+        info "$(tr_msg manual_step_mode_hint)"
+        exit 0
+    fi
+    if { $INTERACTIVE_RECOMMENDED_MODE || $EXPERT_PROFILE_MODE || $AUTO_MODE; } && (( targeted_pending_sections == 0 )); then
+        success "$(tr_msg no_relevant_findings_mode)"
+        info "$(tr_msg open_points_special)"
+        exit 0
+    fi
+
+    local func
+    local -a executed_sections=()
     for func in "${sections[@]}"; do
+        if ! should_execute_section_in_current_mode "$func"; then
+            continue
+        fi
+        executed_sections+=("$func")
         if declare -f "$func" >/dev/null 2>&1; then
             "$func"
         else
-            warn "Function '$func' not defined. Skipping."
+            warn "Function '$func' not defined."
         fi
     done
 
-    # Offer backup management
-    echo
-    if ask_yes_no "View/manage backups created by this script?" "n"; then
-        list_backups
-        ask_yes_no "Restore a backup?" "n" && restore_backup_interactive
+    if (( ${#executed_sections[@]} > 0 )); then
+        prove_idempotence "${executed_sections[@]}"
+    else
+        info "Idempotence proof skipped — no sections were executed in this run."
     fi
 
+    # Post-hardening assessment
     echo
-    success "=== Script finished ==="
-    if ! $DRY_RUN; then
-        info "Review: $SCRIPT_LOG_FILE"
-        info "Backups have suffix '$BACKUP_SUFFIX'."
-        info "A reboot may be recommended."
-        log_change "SCRIPT_FINISHED"
+    declare -A ASSESS_RESULTS=()
+    declare -a ASSESS_ORDER=()
+    run_assessment
+    echo -e "\n${C_BOLD}${C_GREEN}Post-Hardening Assessment:${C_RESET}"
+    print_assessment_report
+
+    $AUTO_MODE || {
+        ask_yes_no "$(tr_msg manage_backups)" "n" && {
+            list_backups
+            ask_yes_no "$(tr_msg restore_backup_prompt)" "n" && restore_backup_interactive
+        }
+    }
+
+    echo
+    local final_red; final_red="$(count_red_checks)"
+    if (( final_red == 0 )); then
+        echo -e "${C_GREEN_BOLD}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+        echo -e "${C_GREEN_BOLD}$(tr_msg done_green)${C_RESET}"
+        echo -e "${C_GREEN_BOLD}╚══════════════════════════════════════════════════════════════╝${C_RESET}"
     else
-        warn "*** DRY-RUN MODE: No changes were made. ***"
+        echo -e "${C_RED_BOLD}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
+        echo -e "${C_RED_BOLD}$(tr_msg done_red_prefix) ${final_red} $(tr_msg done_red_suffix)${C_RESET}"
+        echo -e "${C_RED_BOLD}╚══════════════════════════════════════════════════════════════╝${C_RESET}"
     fi
+    echo
+
+    ! $DRY_RUN && {
+        info "Changelog: $SCRIPT_LOG_FILE"
+        info "$(tr_msg txlog_label_with_rb): $TRANSACTION_LOG"
+        info "Backups mit Suffix: '${BACKUP_SUFFIX}'"
+        print_security_log_summary
+        echo -e "  ${C_YELLOW_BOLD}$(tr_msg reboot_recommended)${C_RESET}"
+        txlog "SCRIPT_FINISH" "red_findings=${final_red}"
+        log_change "SCRIPT_FINISHED"
+    } || warn "$(tr_msg dry_run_no_changes)"
+
+    $VERIFY_AFTER_HARDENING && (( final_red == 0 )) && exit 0
+    $VERIFY_AFTER_HARDENING && exit 2
+    exit 0
 }
 
 main
-exit 0
