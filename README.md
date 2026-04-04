@@ -123,6 +123,24 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Interactive detection + selection menu for installed components
 - `--remove target1,target2` CLI flag for scripted use
 
+### Log Viewer *(new in v3.0.2)*
+- Built-in interactive log menu accessible after hardening
+- Shows a summary of all relevant log file locations after every run
+- Menu entries (0–10):
+
+| # | Entry |
+|---|-------|
+| 1 | Security log summary (all relevant paths at a glance) |
+| 2 | AIDE init log |
+| 3 | AIDE check log |
+| 4 | Latest AIDE daily report |
+| 5 | Fail2ban journal |
+| 6 | Fail2ban status |
+| 7 | auditd journal |
+| 8 | auditd raw log |
+| 9 | Script change log |
+| 10 | Transaction log |
+
 ### Dry-Run Mode
 - Preview all changes without modifying the system
 - Activated via: `sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run`
@@ -242,6 +260,7 @@ sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
 
 ## 🔒 Security & Quality Improvements in v3.0.2
 
+- **Built-in log viewer menu** — interactive post-hardening menu (0–10) with direct access to AIDE, auditd, Fail2ban logs, script change log, and transaction log; security log summary printed automatically after every run
 - **AppArmor assessment fixed** — correctly detects partially unloaded/teardown states instead of reporting false GREEN
 - **AppArmor skipped by default on Docker/Podman hosts** — unless explicitly forced
 - **SSH hardening improved** — detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
