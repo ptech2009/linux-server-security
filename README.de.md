@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.2** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
 Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur bei gefundenen Problemen nach.
 
@@ -12,8 +12,10 @@ Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First
 - **Automatisierte Erstellung von SSH-Schlüsselpaaren**  
   Generierung von Ed25519-Schlüsseln mit der Option, den öffentlichen Schlüssel automatisch in `authorized_keys` einzufügen.
 - **Config-Validierung**  
-  `sshd -t`-Prüfung vor jedem Neustart verhindert fehlerhafte Konfigurationen.
+  `sshd -t`-Prüfung vor jedem Neustart — gibt bei Fehler die echte Fehlermeldung aus.
 - **Drop-in-Konfiguration** via `/etc/ssh/sshd_config.d/` (modern, nicht-destruktiv).
+- Erkennt keyboard-interactive/2FA-`AuthenticationMethods` und vermeidet das Deaktivieren benötigter Methoden.
+- `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert.
 
 ### ✅ Google 2FA (Zwei-Faktor-Authentifizierung)
 - Installation und Konfiguration von Google Authenticator (`libpam-google-authenticator`).
@@ -60,7 +62,7 @@ Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First
 - Einrichtung von `Allowed-Origins`, Reboot-Zeitplan und E-Mail-Benachrichtigungen.
 - Validierung und Korrektur der periodischen `20auto-upgrades`-Konfiguration.
 
-### ✅ PAM-Härtung *(komplett neu geschrieben in v3.0)*
+### ✅ PAM-Härtung *(komplett neu geschrieben)*
 - Verwendet `pam-auth-update` (Debian/Ubuntu-nativer Mechanismus) — **kein rohes `sed` auf Live-PAM-Dateien**.
 - `pam_faillock` via `/etc/security/faillock.conf` (moderner, sicherer Ansatz).
 - Passwortqualität via `/etc/security/pwquality.conf`.
@@ -76,9 +78,12 @@ Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First
 - Lokale Ausschlüsse für volatile Container-/Log-Pfade zur Rauschreduzierung auf Live-Hosts.
 - Automatische tägliche Prüfung via Cron (`/etc/cron.daily/aide-check`).
 - Robuste DB-Erkennung mit `nice`/`ionice`-Unterstützung, nicht-interaktiver Init mit Timeout.
+- Bevorzugt autogenerierte Konfiguration; Cron kann Fallback-Config ohne `update-aide.conf` aktualisieren.
 
 ### ✅ AppArmor-Durchsetzung
 - Schaltet alle geladenen AppArmor-Profile von Complain- auf Enforce-Modus.
+- Erkennt korrekt teilweise entladene/Teardown-Zustände — keine falschen GREEN-Meldungen.
+- Wird auf Docker/Podman-Hosts standardmäßig übersprungen, sofern nicht explizit erzwungen.
 - Prüft und meldet Profile, die nicht sauber enforced werden können.
 
 ### ✅ Dateisystem-Härtung
@@ -109,22 +114,40 @@ Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First
 - **`restore_backup_interactive`**: Nummeriertes Menü zur selektiven Wiederherstellung.
 - **Interaktive Backup-Verwaltung** am Skriptende.
 
-### ✅ Vollständiger Rollback *(neu in v3.0)*
+### ✅ Vollständiger Rollback
 - Stellt alle gesicherten Konfigurationsdateien aus dem maschinenlesbaren **Transaktions-Log** wieder her.
 - Entfernt vom Skript installierte Pakete.
 - Entsperrt den Root-Account, falls vom Skript gesperrt.
 - Entfernt alle vom Skript angelegten Dateien und stellt entfernte Cron-Jobs wieder her.
 - Läuft nicht-interaktiv und vollautomatisch.
 
-### ✅ Selektives Entfernen *(verbessert in v3.0)*
+### ✅ Selektives Entfernen
 - Interaktives Erkennungs- und Auswahlmenü für installierte Komponenten.
 - `--remove target1,target2`-Flag für geskripteten Einsatz.
+
+### ✅ Log-Viewer *(neu in v3.0.2)*
+- Interaktives Log-Menü, das nach der Härtung aufgerufen werden kann.
+- Zeigt nach jedem Lauf eine Übersicht aller relevanten Log-Dateipfade an.
+- Menüpunkte (0–10):
+
+| # | Eintrag |
+|---|---------|
+| 1 | Security-Log-Übersicht (alle relevanten Pfade auf einen Blick) |
+| 2 | AIDE Init-Log |
+| 3 | AIDE Check-Log |
+| 4 | Neuester AIDE-Tagesreport |
+| 5 | Fail2ban Journal |
+| 6 | Fail2ban Status |
+| 7 | auditd Journal |
+| 8 | auditd Rohlog |
+| 9 | Skript-Änderungslog |
+| 10 | Transaktionslog |
 
 ### ✅ Dry-Run Modus
 - **Vorschau-Modus**: Simuliert die Ausführung, ohne Änderungen am System vorzunehmen.
 - Aktivierung:
   ```bash
-  sudo ./Linux-Server-Security-Script_v3_0.sh --dry-run
+  sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run
   ```
 
 ---
@@ -162,11 +185,11 @@ Gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, a
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0.sh
-sudo ./Linux-Server-Security-Script_v3_0.sh
+chmod +x Linux-Server-Security-Script_v3_0_2.sh
+sudo ./Linux-Server-Security-Script_v3_0_2.sh
 ```
 
-### Startmenü *(neu in v3.0)*
+### Startmenü
 
 Beim Start wird ein Modus gewählt (verfügbar auf **Deutsch und Englisch**):
 
@@ -184,19 +207,19 @@ Beim Start wird ein Modus gewählt (verfügbar auf **Deutsch und Englisch**):
 
 ```bash
 # Vorschau ohne Änderungen
-sudo ./Linux-Server-Security-Script_v3_0.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run
 
 # Nur Prüfung (Exit-Code 2 bei verbleibenden RED-Findings)
-sudo ./Linux-Server-Security-Script_v3_0.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_2.sh --assess
 
 # Vollständiger Rollback
-sudo ./Linux-Server-Security-Script_v3_0.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_2.sh --rollback
 
 # Selektives Entfernen
-sudo ./Linux-Server-Security-Script_v3_0.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_2.sh --remove fail2ban,clamav
 
 # Verifikation nach Härtung (Exit-Code 2 bei RED-Findings)
-sudo ./Linux-Server-Security-Script_v3_0.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
 ```
 
 ### Voraussetzungen
@@ -242,18 +265,25 @@ sudo ./Linux-Server-Security-Script_v3_0.sh --verify
 
 ---
 
-## 🔒 Sicherheits- und Qualitätsverbesserungen in v3.0
+## 🔒 Sicherheits- und Qualitätsverbesserungen in v3.0.2
 
-- **PAM-Härtung komplett neu geschrieben** — verwendet `pam-auth-update` (Debian/Ubuntu-nativ), kein rohes `sed` auf Live-PAM-Dateien; `pam_faillock` via `/etc/security/faillock.conf`
+- **Integriertes Log-Viewer-Menü** — interaktives Menü (0–10) nach der Härtung mit direktem Zugriff auf AIDE-, auditd-, Fail2ban-Logs, Skript-Änderungslog und Transaktionslog; Security-Log-Übersicht wird automatisch nach jedem Lauf ausgegeben
+- **AppArmor-Assessment korrigiert** — erkennt korrekt teilweise entladene/Teardown-Zustände statt falsche GREEN-Meldungen
+- **AppArmor auf Docker/Podman-Hosts standardmäßig übersprungen** — sofern nicht explizit erzwungen
+- **SSH-Härtung verbessert** — erkennt keyboard-interactive/2FA-`AuthenticationMethods` und vermeidet das Deaktivieren benötigter Methoden
+- **SSH-Validierung verbessert** — gibt echte `sshd -t`-Fehlermeldungen aus; `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert
+- **Idempotenz-Prüfung im Schritt-für-Schritt-Modus übersprungen** — verhindert versteckte Wiederholungen von Sektionen, die der Nutzer übersprungen hat
+- **AIDE-Fallback korrigiert** — erstellt `aide.conf.autogenerated` korrekt aus `/etc/aide/aide.conf.d/`, führt ausführbare Debian-Snippets aus
+- **AIDE-Ausschlüsse korrigiert** — legt Zielverzeichnisse an und schließt volatile Container-/Log-Pfade für weniger Rauschen auf Live-Hosts ein
+- **AIDE-Init/-Check verbessert** — bevorzugt autogenerierte Config; optionales `nice`/`ionice`; Cron kann Fallback-Config ohne `update-aide.conf` aktualisieren
+- **Selektives Entfernen-Menü korrigiert** — wird jetzt korrekt interaktiv dargestellt und akzeptiert Auswahlen zuverlässig
+- **PAM-Härtung** — verwendet `pam-auth-update` (Debian/Ubuntu-nativ), kein rohes `sed` auf Live-PAM-Dateien; `pam_faillock` via `/etc/security/faillock.conf`
 - **Sudo-Smoke-Test** nach jeder PAM-Änderung — automatischer Rollback, falls `sudo` nicht mehr funktioniert
 - **Vollständiger Rollback-Modus** (`--rollback`) — maschinenlesbares Transaktions-Log ermöglicht vollständige Systemwiederherstellung
-- **AppArmor-Enforce-Sektion** — schaltet alle geladenen Profile in den Enforce-Modus
 - **Startmenü 1–7** mit Sprachauswahl (Deutsch/Englisch) beim Start
 - **Sicherer Config-Parser** — kein `source`/`eval` zum Einlesen von Konfigurationsdateien
 - **`--verify`-Flag** — Exit-Code 2 bei verbleibenden RED-Findings nach Härtung (CI/CD-kompatibel)
-- **AIDE-Verbesserungen** — nicht-interaktiver Init mit Timeout, robuste DB-Erkennung, `nice`/`ionice`-Unterstützung, volatile Ausschlüsse für Live-Hosts
 - **Tmpfile-Cleanup auf EXIT-Trap** — keine temporären Dateien bei Abbruch
-- **Login-Banner-Rollback** entfernt nun zuverlässig verbleibende Banner-Dateien
 - **`set -uo pipefail`** — strikte Fehlerbehandlung ohne `set -e` (das bei grep zu falschen Abbrüchen führte)
 - **Kein `eval()`-Einsatz** — alle Befehle über sichere Array-basierte `run_cmd()`-Funktion
 - **Config-Validierung vor Neustarts** — `sshd -t`, `fail2ban-client -t`, `visudo -c` verhindern fehlerhafte Konfigurationen
