@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.2** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+**Version 3.0.3** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
 
 Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
 
@@ -13,6 +13,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Drop-in config via `/etc/ssh/sshd_config.d/` (modern, non-destructive)
 - Detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
 - `PermitRootLogin` normalized to `prohibit-password` in managed drop-ins
+- **SSH crypto policy mode** (`off` | `modern` | `fips-compatible`) with validation and rollback on failure
 
 ### Google 2FA (Two-Factor Authentication)
 - Installs and configures `libpam-google-authenticator`
@@ -49,6 +50,17 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - **Auto-audits** `SystemMaxUse` against configured target (default: 1G)
 - Only prompts if the value differs from the recommendation
 
+### Login Umask Hardening *(new in v3.0.3)*
+- Service-safe hardening for interactive users only
+- Configures `umask 027` in `/etc/login.defs` and `/etc/profile.d/`
+- Assessment checks login umask settings against baseline
+
+### SUID/SGID Inventory & Auditing *(new in v3.0.3)*
+- Creates a baseline of all SUID/SGID binaries on first run
+- Daily audit-only reporting via cron — no automatic removals
+- Writes inventory to `/var/lib/security-script/suid_sgid_baseline.txt`
+- Reports differences at `/var/log/security-script-suid-sgid-report.log`
+
 ### ClamAV Antivirus
 - Installs `clamav` and `clamav-daemon` if missing
 - Runs initial `freshclam` database update
@@ -59,7 +71,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Sets up `Allowed-Origins`, reboot schedule, and email notifications
 - Validates and fixes `20auto-upgrades` periodic configuration
 
-### PAM Hardening *(completely rewritten)*
+### PAM Hardening
 - Uses `pam-auth-update` (Debian/Ubuntu native mechanism) — **no raw `sed` on live PAM files**
 - `pam_faillock` via `/etc/security/faillock.conf` (modern, safe approach)
 - Password quality enforcement via `/etc/security/pwquality.conf`
@@ -67,7 +79,8 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 
 ### auditd (Audit Framework)
 - Installs and configures `auditd` for detailed system event recording
-- Writes CIS/BSI-oriented rules to `/etc/audit/rules.d/99-security-script.rules`
+- **Expanded STIG-style ruleset** covering session files, time changes, permission changes, hostname changes, shell/profile hardening files, rsyslog, modprobe, and GRUB
+- Writes rules to `/etc/audit/rules.d/99-security-script.rules`
 - Prints relevant log locations and commands after setup
 
 ### AIDE (File Integrity Monitoring)
@@ -123,7 +136,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Interactive detection + selection menu for installed components
 - `--remove target1,target2` CLI flag for scripted use
 
-### Log Viewer *(new in v3.0.2)*
+### Log Viewer
 - Built-in interactive log menu accessible after hardening
 - Shows a summary of all relevant log file locations after every run
 - Menu entries (0–10):
@@ -143,7 +156,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 
 ### Dry-Run Mode
 - Preview all changes without modifying the system
-- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run`
+- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run`
 
 ---
 
@@ -171,7 +184,7 @@ INFO:   Recommendation: Enable [sshd] jail to protect SSH against brute-force.
   Fix: Enable [sshd] jail? [Y/n]:
 ```
 
-This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, auditd, Filesystem, PAM, and Login Banners.
+This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, auditd, Filesystem, PAM, Login Banners, Login Umask, and SSH Crypto Policy.
 
 ---
 
@@ -180,8 +193,8 @@ This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, A
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_2.sh
-sudo ./Linux-Server-Security-Script_v3_0_2.sh
+chmod +x Linux-Server-Security-Script_v3_0_3.sh
+sudo ./Linux-Server-Security-Script_v3_0_3.sh
 ```
 
 ### Startup Menu
@@ -191,7 +204,7 @@ On launch, you choose one of seven modes (available in **German and English**):
 | # | Mode | Description |
 |---|------|-------------|
 | 1 | Assessment only | Audit without changes, exit code 2 on RED findings |
-| 2 | Recommended hardening | Applies best-practice defaults automatically |
+| 2 | Recommended hardening | Applies best-practice defaults automatically, including baseline fixes for real RED findings |
 | 3 | Step by step | Reviews all areas one by one |
 | 4 | Fully automatic | Reads `security_config.env` |
 | 5 | Full rollback | Restores pre-script state without further prompts |
@@ -202,19 +215,19 @@ On launch, you choose one of seven modes (available in **German and English**):
 
 ```bash
 # Preview without changes
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run
 
 # Assessment only (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --assess
 
 # Full rollback
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --rollback
 
 # Selective removal
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --remove fail2ban,clamav
 
 # Verify after hardening (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 ```
 
 ### Requirements
@@ -232,6 +245,7 @@ sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
 | Idempotent (safe for repeated runs) | ✅ Yes | 🔶 Partially | ✅ Yes | ✅ Yes |
 | Audit-first pattern | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | SSH hardening | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| SSH crypto policy | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
 | Google 2FA integration | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Sysctl hardening | ✅ Yes (`/etc/sysctl.d/`) | 🔶 Minimal | 🔶 Partially | ✅ Yes |
 | Sudoers TTY tickets | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
@@ -241,12 +255,14 @@ sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
 | Fail2ban + SSHGuard | ✅ Yes | ✅ Yes | ❌ No | ✅ Yes |
 | ClamAV integration | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | PAM hardening (safe, native) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| auditd / audit rules | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
+| auditd / audit rules (STIG-expanded) | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
 | AIDE file integrity | ✅ Yes | ❌ No | ✅ Yes | ❌ No |
 | AppArmor enforcement | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
 | Filesystem hardening | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | Kernel module blacklist | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | Core dump restrictions | ✅ Yes | ❌ No | ✅ Yes | 🔶 Partially |
+| Login umask hardening | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
+| SUID/SGID inventory & audit | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Login banners | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
 | Config backups & restore | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
 | Full rollback + transaction log | ✅ Yes | ❌ No | ❌ No | ❌ No |
@@ -258,28 +274,19 @@ sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.2
+## 🔒 Security & Quality Improvements in v3.0.3
 
-- **Built-in log viewer menu** — interactive post-hardening menu (0–10) with direct access to AIDE, auditd, Fail2ban logs, script change log, and transaction log; security log summary printed automatically after every run
-- **AppArmor assessment fixed** — correctly detects partially unloaded/teardown states instead of reporting false GREEN
-- **AppArmor skipped by default on Docker/Podman hosts** — unless explicitly forced
-- **SSH hardening improved** — detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
-- **SSH validation improved** — prints real `sshd -t` error output; `PermitRootLogin` normalized to `prohibit-password` in managed drop-ins
-- **Idempotence proof skipped in step-by-step mode** — avoids hidden replays of sections the user chose to skip
-- **AIDE fallback fixed** — builds `aide.conf.autogenerated` correctly from `/etc/aide/aide.conf.d/`, executing executable Debian snippets
-- **AIDE local excludes fixed** — creates target directories and includes volatile container/log paths for reduced noise on live hosts
-- **AIDE init/check improved** — prefers autogenerated config; optional `nice`/`ionice`; cron can refresh fallback config without `update-aide.conf`
-- **Selective removal menu fixed** — renders interactively and accepts selections correctly
-- **PAM hardening** — uses `pam-auth-update` (Debian/Ubuntu native), no raw `sed` on live PAM files; `pam_faillock` via `/etc/security/faillock.conf`
-- **Sudo smoke-test** after every PAM change — automatic rollback if `sudo` breaks
-- **Full rollback mode** (`--rollback`) — machine-readable transaction log enables complete system restore
-- **Startup menu 1–7** with language selection (Deutsch / English) at launch
-- **Safe config file parser** — no `source`/`eval` for reading config files
-- **`--verify` flag** — exits with code 2 if RED findings remain after hardening (CI/CD compatible)
-- **All tmpfile cleanups on EXIT trap** — no leftover temporary files on abort
-- **`set -uo pipefail`** — strict error handling without `set -e` (which caused false exits on grep)
-- **No `eval()` usage** — all commands executed via safe array-based `run_cmd()` function
-- **Config validation before restarts** — `sshd -t`, `fail2ban-client -t`, `visudo -c` prevent broken configs from being applied
+- **Recommended mode enhanced** — actively offers baseline fixes for real RED findings such as auditd, AIDE, login umask, SUID/SGID baseline, and SSH crypto policy
+- **SSH crypto policy** — new mode (`off` | `modern` | `fips-compatible`) with config validation and automatic rollback on failure; assessment differentiates between missing explicit policy and actually weak algorithms; recommended mode defaults to `modern`
+- **Login umask hardening** — service-safe hardening for interactive users only via `/etc/login.defs` and `/etc/profile.d/`; assessment checks equivalent shell hook locations
+- **SUID/SGID inventory** — baseline generation on first run; daily audit-only cron reporting; fixed TMP_FILE expansion bug and empty cron target script
+- **auditd ruleset expanded** — STIG-style coverage for session files, time change, permission changes, hostname changes, shell/profile hardening files, rsyslog, modprobe, and GRUB
+- **Assessment extended** — now checks SSH crypto policy, login umask, SUID/SGID baseline coverage, and extended auditd coverage
+- **Idempotence proof** — now only plans for sections actually executed in the run; skipped in step-by-step mode for sections the user chose to skip
+- **Assessment logic hardened** — sudoers TTY regex fixed, auditd dependency handling improved, AppArmor active-process awareness corrected
+- **SSH crypto prompt** — accepts Enter/y/yes as the recommended default and n/no as opt-out
+- **Container/workload safety** — all new additions are service-aware and avoid broad changes that could break Nextcloud, AdGuard Home, Caddy, Docker, or Podman workloads
+- **RETAINED from v3.0.2**: Safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
 
 ---
 
