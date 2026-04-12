@@ -2,21 +2,24 @@
 
 # ============================================================================
 # Linux Server Security Script
-# Version: 3.0.3
+# Version: 3.0.4
 # Author: Paul Schumacher
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
 #
-# Changelog v3.0.3:
-# - IMPROVED v3.0.3: Recommended mode now actively offers baseline fixes for real RED findings
+# Changelog v3.0.4:
+# - IMPROVED v3.0.4: Recommended mode now actively offers baseline fixes for real RED findings
 #   such as auditd, AIDE, login umask, SUID/SGID baseline and SSH crypto policy
-# - IMPROVED v3.0.3: Fixed SUID/SGID inventory script generation (no TMP_FILE expansion bug; no empty cron target script)
-# - IMPROVED v3.0.3: SSH crypto prompt now accepts Enter/y/yes as the recommended default and n/no as off
-# - IMPROVED v3.0.3: Idempotence proof now only plans for sections actually executed in the run
-# - IMPROVED v3.0.3: Recommended mode defaults SSH crypto policy to 'modern' instead of 'off'
-# - IMPROVED v3.0.3: Context-aware optional skips in recommended mode now only suppress non-baseline extras
+# - IMPROVED v3.0.4: Fixed SUID/SGID inventory script generation (no TMP_FILE expansion bug; no empty cron target script)
+# - FIXED v3.0.4: SSH effective config fallback now also reads sshd_config.d drop-ins when sshd -T is not usable
+# - FIXED v3.0.4: Prevent writing empty SSH directive values into the hardening drop-in
+# - FIXED v3.0.4: Added safe fallback defaults for ClientAliveInterval, ClientAliveCountMax and PrintLastLog
+# - IMPROVED v3.0.4: SSH crypto prompt now accepts Enter/y/yes as the recommended default and n/no as off
+# - IMPROVED v3.0.4: Idempotence proof now only plans for sections actually executed in the run
+# - IMPROVED v3.0.4: Recommended mode defaults SSH crypto policy to 'modern' instead of 'off'
+# - IMPROVED v3.0.4: Context-aware optional skips in recommended mode now only suppress non-baseline extras
 #
-# Changelog v3.0.3:
+# Changelog v3.0.4:
 # - NEW: Service-safe login umask hardening for interactive users only (/etc/login.defs + /etc/profile.d)
 # - NEW: SSH crypto policy mode (off | modern | fips-compatible) with validation + rollback on failure
 # - NEW: SUID/SGID inventory baseline + daily audit-only reporting (no automatic removals)
@@ -26,11 +29,11 @@
 #   and extended auditd coverage in addition to the existing baseline checks
 # - IMPROVED: All Mil/Gov-oriented additions are service-aware by default and avoid broad changes
 #   that could break Nextcloud, AdGuard Home, Caddy, Docker or Podman workloads
-# - FIXED v3.0.3: assessment logic made more robust (sudoers tty regex, auditd dependency handling, AppArmor active-process awareness)
-# - IMPROVED v3.0.3: interactive login umask check now accepts equivalent shell hook locations
-# - IMPROVED v3.0.3: SSH crypto assessment differentiates between missing explicit policy and actually weak algorithms
+# - FIXED v3.0.4: assessment logic made more robust (sudoers tty regex, auditd dependency handling, AppArmor active-process awareness)
+# - IMPROVED v3.0.4: interactive login umask check now accepts equivalent shell hook locations
+# - IMPROVED v3.0.4: SSH crypto assessment differentiates between missing explicit policy and actually weak algorithms
 # - RETAINED: Safe PAM handling, rollback support, transaction logging, AIDE/AppArmor/container logic,
-#   idempotence checks, SSH validation and interactive/automatic modes from v3.0.2
+#   idempotence checks, SSH validation and interactive/automatic modes from v3.0.3
 # ============================================================================
 
 set -uo pipefail
@@ -38,7 +41,7 @@ set -uo pipefail
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-readonly SCRIPT_VERSION="3.0.3"
+readonly SCRIPT_VERSION="3.0.4"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
@@ -1343,10 +1346,17 @@ sudo_smoke_test() {
 # ============================================================================
 validate_pam_file() {
     local pam_file="$1"
-    # Check basic structure: must have at least one auth line with pam_unix.so
-    if ! grep -q "pam_unix.so" "$pam_file"; then
-        error "PAM validation failed: pam_unix.so not found in $pam_file"
+    # Accept Ubuntu/Debian PAM layouts that use includes instead of direct pam_unix.so lines.
+    if ! grep -qE "^(auth\s+\S+\s+\S+|@include\s+common-auth|auth\s+substack\s+common-auth)" "$pam_file"; then
+        error "PAM validation failed: no usable auth stack found in $pam_file"
         return 1
+    fi
+    # For 2FA-aware sshd PAM, allow either direct pam_unix.so or the standard Debian/Ubuntu include chain.
+    if grep -q "pam_google_authenticator.so" "$pam_file"; then
+        if ! grep -qE "(^@include\s+common-auth$|^auth\s+substack\s+common-auth$|pam_unix\.so)" "$pam_file"; then
+            error "PAM validation failed: google-authenticator present, but no local auth/include chain found in $pam_file"
+            return 1
+        fi
     fi
     # Check for obviously broken lines (syntax errors would have empty module names)
     if grep -qE "^(auth|account|password|session)\s+\S+\s*$" "$pam_file"; then
@@ -1430,12 +1440,43 @@ get_effective_sshd_config() {
     command -v sshd >/dev/null 2>&1 && \
         result=$(sshd -T -C user=root -C host=localhost -C addr=127.0.0.1 2>/dev/null | \
             grep -i "^${parameter}[[:space:]]" | head -n 1 | awk '{print $2}' || true)
-    [[ -z "$result" ]] && [[ -f /etc/ssh/sshd_config ]] && \
-        result=$(grep -iE "^\s*${parameter}\s+" /etc/ssh/sshd_config 2>/dev/null | \
+    [[ -z "$result" ]] && \
+        result=$(grep -ihRE "^[[:space:]]*${parameter}[[:space:]]+" \
+            /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | \
             tail -n 1 | awk '{print $2}' || true)
     echo "$result"
 }
 
+
+ssh_google_2fa_assessment() {
+    local pam_file="/etc/pam.d/sshd"
+    local usepam kbdinteractive challenge authmethods
+    local has_gauth_pam=false has_gauth_pkg=false has_user_secret=false
+
+    [[ -f "$pam_file" ]] && grep -Eq '^[[:space:]]*auth[[:space:]].*pam_google_authenticator\.so\b' "$pam_file" && has_gauth_pam=true
+    is_package_installed libpam-google-authenticator && has_gauth_pkg=true
+    find /root /home -maxdepth 2 -name .google_authenticator -type f 2>/dev/null | grep -q . && has_user_secret=true
+
+    usepam=$(get_effective_sshd_config "UsePAM")
+    kbdinteractive=$(get_effective_sshd_config "KbdInteractiveAuthentication")
+    challenge=$(get_effective_sshd_config "ChallengeResponseAuthentication")
+    authmethods=$(get_effective_sshd_config "AuthenticationMethods")
+
+    if $has_gauth_pam && [[ "${usepam,,}" == "yes" ]]        && ([[ "${kbdinteractive,,}" == "yes" ]] || [[ "${challenge,,}" == "yes" ]])        && [[ "$authmethods" == *keyboard-interactive* ]]; then
+        record_check "SSH_GOOGLE_2FA" "PASS" "Google 2FA active for SSH (PAM + keyboard-interactive)"
+    elif $has_gauth_pam || $has_gauth_pkg || $has_user_secret; then
+        local detail=""
+        $has_gauth_pam && detail+="pam_google_authenticator configured; "
+        $has_gauth_pkg && detail+="package installed; "
+        $has_user_secret && detail+="user secret present; "
+        [[ "$authmethods" == *keyboard-interactive* ]] || detail+="AuthenticationMethods does not require keyboard-interactive; "
+        ([[ "${kbdinteractive,,}" == "yes" ]] || [[ "${challenge,,}" == "yes" ]]) || detail+="keyboard-interactive/challenge-response disabled; "
+        detail=${detail%%; }
+        record_check "SSH_GOOGLE_2FA" "WARN" "Google 2FA not fully active for SSH (${detail})"
+    else
+        record_check "SSH_GOOGLE_2FA" "FAIL" "Google 2FA not enabled for SSH"
+    fi
+}
 get_ssh_port() {
     local port; port=$(get_effective_sshd_config "port")
     { [[ -n "$port" ]] && validate_port "$port"; } && echo "$port" || echo "22"
@@ -1864,9 +1905,30 @@ ssh_dropin_validate_and_restore() {
     return 1
 }
 
+normalize_sshd_include_path() {
+    local f="$1"
+    [[ -f "$f" ]] || return 2
+    local before after changed=1
+    before=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
+    if grep -Eq '^[[:space:]]*Include[[:space:]]+/tmp/[^[:space:]]+/sshd_config\.d/\*\.conf([[:space:]]|$)' "$f"; then
+        sed -i -E 's|^[[:space:]]*Include[[:space:]]+/tmp/[^[:space:]]+/sshd_config\.d/\*\.conf([[:space:]]*)$|Include /etc/ssh/sshd_config.d/*.conf|' "$f"
+    elif grep -Eq '^[[:space:]]*Include[[:space:]]+.+sshd_config\.d/\*\.conf([[:space:]]|$)' "$f"          && ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$f"; then
+        sed -i -E '0,/^[[:space:]]*Include[[:space:]]+.+sshd_config\.d\/\*\.conf([[:space:]]|$)/s|^[[:space:]]*Include[[:space:]]+.+sshd_config\.d/\*\.conf([[:space:]]|$)|Include /etc/ssh/sshd_config.d/*.conf|' "$f"
+    elif ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$f"; then
+        sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$f"
+    fi
+    after=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
+    [[ "$before" != "$after" ]] && changed=0
+    return $changed
+}
+
 ssh_uses_keyboard_interactive() {
     local auth_methods
     auth_methods=$(get_effective_sshd_config "AuthenticationMethods" 2>/dev/null || true)
+    [[ -z "$auth_methods" ]] && \
+        auth_methods=$(grep -ihRE '^[[:space:]]*AuthenticationMethods[[:space:]]+' \
+            /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | \
+            tail -n 1 | awk '{print $2}' || true)
     [[ "${auth_methods,,}" == *"keyboard-interactive"* ]]
 }
 
@@ -2380,6 +2442,12 @@ component_is_removable() {
         ssh_crypto)
             ssh_dropin_has_any_key MACs Ciphers KexAlgorithms HostKeyAlgorithms PubkeyAcceptedAlgorithms && return 0
             return 1 ;;
+        ssh_google_2fa|google_2fa|ssh_2fa)
+            [[ -f "/etc/pam.d/sshd" ]] && grep -Eq '^[[:space:]]*auth[[:space:]].*pam_google_authenticator\.so\b' /etc/pam.d/sshd 2>/dev/null && return 0
+            is_package_installed "libpam-google-authenticator" && return 0
+            find /root /home -maxdepth 2 -name .google_authenticator -type f 2>/dev/null | grep -q . && return 0
+            [[ "$(get_effective_sshd_config "AuthenticationMethods")" == *keyboard-interactive* ]] && return 0
+            return 1 ;;
         ssh|ssh_hardening)
             component_is_removable ssh_baseline && return 0
             component_is_removable ssh_crypto && return 0
@@ -2456,6 +2524,7 @@ component_menu_description() {
     case "$target" in
         ssh_baseline) echo "SSH-Basishärtung (Forwarding, Timeouts, Sessions, Root/Passwort)" ;;
         ssh_crypto) echo "SSH-Crypto-Policy (MACs / Ciphers / KEX)" ;;
+        ssh_google_2fa|google_2fa|ssh_2fa) echo "SSH Google 2FA (PAM / keyboard-interactive / Benutzer-Secret)" ;;
         ssh|ssh_hardening) echo "SSH-Hardening / SSH-Crypto-Policy" ;;
         banners|banner) echo "Login-Banner / MOTD / SSH-Banner" ;;
         auditd|audit) echo "auditd Regeln und ggf. Paket" ;;
@@ -2552,7 +2621,7 @@ count_targeted_pending_sections() {
 }
 
 interactive_selective_removal_menu() {
-    local -a candidate_targets=(ssh_baseline ssh_crypto banners pam login_umask suid_sgid sysctl journald sudoers modules auditd aide fail2ban unattended_upgrades clamav ufw)
+    local -a candidate_targets=(ssh_baseline ssh_crypto ssh_google_2fa banners pam login_umask suid_sgid sysctl journald sudoers modules auditd aide fail2ban unattended_upgrades clamav ufw)
     local -a visible_targets=()
     local -a hidden_targets=()
     local -a selected_flags=()
@@ -2676,6 +2745,7 @@ component_hidden_reason() {
     case "$target" in
         ssh_baseline) echo "kein verwalteter SSH-Baseline-Drop-in erkannt" ;;
         ssh_crypto) echo "keine verwaltete SSH-Crypto-Policy erkannt" ;;
+        ssh_google_2fa|google_2fa|ssh_2fa) echo "keine Google-2FA-Spuren für SSH erkannt" ;;
         banners|banner) echo "keine vom Skript verwalteten Banner erkannt" ;;
         auditd|audit) echo "auditd-Regeln/Paket aktuell nicht vorhanden" ;;
         aide) echo "AIDE-Paket/Baseline aktuell nicht vorhanden" ;;
@@ -2705,6 +2775,10 @@ component_removal_preview() {
             printf '%s\n' "- entfernt nur MACs/Ciphers/KexAlgorithms aus ${SSHD_HARDENING_DROPIN}" \
                           "- belässt sonstige SSH-Basishärtung unangetastet" \
                           "- validiert sshd -t und startet SSH bei Erfolg neu" ;;
+        ssh_google_2fa|google_2fa|ssh_2fa)
+            printf '%s\n' "- entfernt pam_google_authenticator aus /etc/pam.d/sshd" \
+                          "- entfernt AuthenticationMethods publickey,keyboard-interactive und deaktiviert keyboard-interactive/challenge-response" \
+                          "- entfernt die .google_authenticator-Datei des aktuellen Benutzerkontexts und startet SSH bei Erfolg neu" ;;
         banners|banner)
             printf '%s\n' "- stellt Banner-/MOTD-Backups wieder her oder leert verwaltete Banner" \
                           "- entfernt ggf. die Banner-Referenz aus sshd_config" \
@@ -2851,6 +2925,93 @@ rollback_ssh_baseline_component() {
 rollback_ssh_crypto_component() {
     info "${C_BOLD}Selective rollback: ssh_crypto${C_RESET}"
     ssh_selective_prune_keys "ssh_crypto" MACs Ciphers KexAlgorithms HostKeyAlgorithms PubkeyAcceptedAlgorithms
+}
+
+rollback_ssh_google_2fa_component() {
+    info "${C_BOLD}Selective rollback: ssh_google_2fa${C_RESET}"
+    local pam_file="/etc/pam.d/sshd" sshd_cfg="/etc/ssh/sshd_config"
+    local target_user="${SUDO_USER:-$(whoami)}"
+    local user_home; user_home=$(eval echo "~$target_user")
+    local pam_changed=false ssh_changed=false secret_removed=false
+
+    if [[ -f "$pam_file" ]]; then
+        backup_file "$pam_file"
+        local tp; tp=$(mktemp_tracked)
+        cp "$pam_file" "$tp"
+        if grep -Eq '^[[:space:]]*auth[[:space:]].*pam_google_authenticator\.so\b' "$tp"; then
+            sed -i -E '/^[[:space:]]*auth[[:space:]].*pam_google_authenticator\.so\b/d' "$tp"
+            pam_changed=true
+        fi
+        if $pam_changed; then
+            validate_pam_file "$tp" || { error "PAM validation failed after Google 2FA rollback."; rm -f "$tp"; return 1; }
+            if $DRY_RUN; then
+                dry_run_echo "Update $pam_file (remove pam_google_authenticator)"
+                rm -f "$tp" 2>/dev/null || true
+            else
+                mv "$tp" "$pam_file" && chmod 644 "$pam_file" && log_change "MODIFIED:$pam_file (rollback ssh_google_2fa)"
+                success "  ✔ Removed pam_google_authenticator from $pam_file."
+            fi
+        else
+            rm -f "$tp" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ -f "$sshd_cfg" ]]; then
+        backup_file "$sshd_cfg"
+        local ts; ts=$(mktemp_tracked)
+        cp "$sshd_cfg" "$ts"
+        if grep -qiE '^[[:space:]]*AuthenticationMethods[[:space:]].*keyboard-interactive' "$ts"; then
+            sed -i -E '/^[[:space:]]*AuthenticationMethods[[:space:]].*keyboard-interactive/d' "$ts"
+            ssh_changed=true
+        fi
+        set_sshd_param "KbdInteractiveAuthentication" "no" "$ts" && ssh_changed=true || true
+        set_sshd_param "ChallengeResponseAuthentication" "no" "$ts" && ssh_changed=true || true
+        if $ssh_changed; then
+            if $DRY_RUN; then
+                dry_run_echo "Update $sshd_cfg (disable keyboard-interactive Google 2FA)"
+                rm -f "$ts" 2>/dev/null || true
+            else
+                apply_sshd_config "$ts" || return 1
+            fi
+        else
+            rm -f "$ts" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ -f "$user_home/.google_authenticator" ]]; then
+        backup_file "$user_home/.google_authenticator"
+        if $DRY_RUN; then
+            dry_run_echo "Remove $user_home/.google_authenticator"
+        else
+            rm -f "$user_home/.google_authenticator" && success "  ✔ Removed $user_home/.google_authenticator."
+            secret_removed=true
+        fi
+    fi
+
+    local pkg_present=false
+    if is_package_installed "libpam-google-authenticator"; then
+        pkg_present=true
+        if $DRY_RUN; then
+            dry_run_echo "Remove package libpam-google-authenticator"
+        else
+            remove_packages_if_present "libpam-google-authenticator"
+        fi
+    fi
+
+    if ! $pam_changed && ! $ssh_changed && ! $secret_removed && ! $pkg_present; then
+        info "  No Google 2FA state needed rollback."
+        return 0
+    fi
+
+    detect_ssh_service
+    if ! $DRY_RUN; then
+        if sshd -t 2>/dev/null; then
+            systemctl restart "$SSH_SERVICE" >/dev/null 2>&1 && success "  ✔ SSH restarted." || warn "  SSH restart failed after Google 2FA rollback."
+        else
+            warn "  sshd validation failed after Google 2FA rollback; not restarting service."
+            return 1
+        fi
+    fi
 }
 
 rollback_fail2ban_component() {
@@ -3058,6 +3219,7 @@ run_selective_removal() {
             ssh)                         rollback_ssh_component || errors=$((errors+1)) ;;
             ssh_baseline|ssh_hardening)  rollback_ssh_baseline_component || errors=$((errors+1)) ;;
             ssh_crypto)                  rollback_ssh_crypto_component || errors=$((errors+1)) ;;
+            ssh_google_2fa|google_2fa|ssh_2fa) rollback_ssh_google_2fa_component || errors=$((errors+1)) ;;
             banners|banner)               rollback_banners_component || errors=$((errors+1)) ;;
             auditd|audit)                 rollback_auditd_component || errors=$((errors+1)) ;;
             aide)                         rollback_aide_component || errors=$((errors+1)) ;;
@@ -3377,6 +3539,7 @@ run_assessment() {
     else
         record_check "SSH_CRYPTO_POLICY" "FAIL" "SSH crypto policy issue(s): ${ssh_crypto_issues[*]}"
     fi
+    ssh_google_2fa_assessment
 
     # Firewall
     is_package_installed ufw && ufw status 2>/dev/null | grep -q "Status: active" \
@@ -4087,6 +4250,9 @@ configure_ssh_hardening() {
             "LoginGraceTime") current="120" ;;
             "MaxAuthTries") current="6" ;;
             "MaxSessions") current="10" ;;
+            "ClientAliveInterval") current="300" ;;
+            "ClientAliveCountMax") current="2" ;;
+            "PrintLastLog") current="yes" ;;
         esac
         cur_lower=$(echo "${current:-}" | tr '[:upper:]' '[:lower:]')
         rec_lower=$(echo "$recommended" | tr '[:upper:]' '[:lower:]')
@@ -4113,7 +4279,9 @@ configure_ssh_hardening() {
         fi
 
         if $rec_delta_mode && $ask_user; then
-            if [[ -z "$related_check" ]]; then
+            if $ssh_uses_kbi && [[ "$param" =~ ^(ChallengeResponseAuthentication|KbdInteractiveAuthentication|UsePAM|PasswordAuthentication)$ ]]; then
+                preserve_only=false
+            elif [[ -z "$related_check" ]]; then
                 preserve_only=true
             elif ! section_check_is_red "$related_check"; then
                 preserve_only=true
@@ -4178,12 +4346,20 @@ configure_ssh_hardening() {
                 local k
                 while IFS= read -r k; do
                     [[ -n "$k" ]] || continue
+                    [[ -n "${final_secure_values[$k]:-}" ]] || {
+                        warn "Skipping empty SSH value for '$k' to avoid invalid sshd config."
+                        continue
+                    }
                     echo "$k ${final_secure_values[$k]}"
                 done < <(printf '%s
 ' "${!final_secure_values[@]}" | sort)
             } > "$tdrop"
 
+            backup_file "$ssh_config"
             if install_managed_file "$SSHD_HARDENING_DROPIN" "$tdrop" 600; then
+                if normalize_sshd_include_path "$ssh_config"; then
+                    log_change "SSH_MAIN_INCLUDE:/etc/ssh/sshd_config.d/*.conf"
+                fi
                 if [[ -f "$SSHD_HARDENING_DROPIN_LEGACY" ]] && [[ "$SSHD_HARDENING_DROPIN_LEGACY" != "$SSHD_HARDENING_DROPIN" ]]; then
                     rm -f "$SSHD_HARDENING_DROPIN_LEGACY"
                     log_change "REMOVED_LEGACY_FILE:$SSHD_HARDENING_DROPIN_LEGACY"
@@ -4254,8 +4430,19 @@ configure_google_2fa() {
     local pam_file="/etc/pam.d/sshd" pam_changed=false
     backup_file "$pam_file"
     local tp; tp=$(mktemp_tracked); cp "$pam_file" "$tp"
-    grep -q "^@include common-auth" "$tp" && { sed -i 's/^@include common-auth/#@include common-auth/' "$tp"; pam_changed=true; }
-    grep -q "pam_google_authenticator.so" "$tp" || { echo "auth required pam_google_authenticator.so nullok" >> "$tp"; pam_changed=true; }
+    # Keep the standard Debian/Ubuntu include chain intact. Insert the google-authenticator
+    # line directly before the common-auth include (or before the first auth line as fallback)
+    # so PAM still reaches common-auth / pam_unix.so afterwards.
+    if ! grep -q "pam_google_authenticator.so" "$tp"; then
+        if grep -q '^@include common-auth' "$tp"; then
+            sed -i '/^@include common-auth/i auth required pam_google_authenticator.so nullok' "$tp"
+        elif grep -qE '^auth\s' "$tp"; then
+            sed -i '0,/^auth\s/{s//auth required pam_google_authenticator.so nullok\n&/}' "$tp"
+        else
+            printf '%s\n' 'auth required pam_google_authenticator.so nullok' >> "$tp"
+        fi
+        pam_changed=true
+    fi
 
     if $pam_changed; then
         validate_pam_file "$tp" || { error "PAM validation failed. Not applying."; return 1; }
@@ -4263,17 +4450,61 @@ configure_google_2fa() {
             mv "$tp" "$pam_file" && chmod 644 "$pam_file" && log_change "MODIFIED:$pam_file (2FA)"
             sudo_smoke_test "$pam_file" || return 1
         }
+    else
+        rm -f "$tp" 2>/dev/null || true
     fi
 
-    local sc="/etc/ssh/sshd_config" sc_changed=false
+    local sc="/etc/ssh/sshd_config"
+    local ssh_dropin="/etc/ssh/sshd_config.d/00-security-script.conf"
     backup_file "$sc"
-    local ts; ts=$(mktemp_tracked); cp "$sc" "$ts"
-    for pp in "ChallengeResponseAuthentication:yes" "KbdInteractiveAuthentication:yes" \
-              "AuthenticationMethods:publickey,keyboard-interactive" "UsePAM:yes"; do
-        set_sshd_param "${pp%%:*}" "${pp##*:}" "$ts" && sc_changed=true
-    done
-    $sc_changed && apply_sshd_config "$ts" || rm -f "$ts" 2>/dev/null
-    ($pam_changed || $sc_changed) && restart_ssh "2FA" || true
+    [[ -f "$ssh_dropin" ]] && backup_file "$ssh_dropin"
+
+    local stage_dir ts_main ts_drop include_path staged_changed=false
+    stage_dir=$(mktemp -d)
+    chmod 700 "$stage_dir"
+    ts_main="$stage_dir/sshd_config"
+    cp "$sc" "$ts_main"
+    mkdir -p "$stage_dir/sshd_config.d"
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        cp -a /etc/ssh/sshd_config.d/. "$stage_dir/sshd_config.d/" 2>/dev/null || true
+    fi
+    ts_drop="$stage_dir/sshd_config.d/00-security-script.conf"
+    [[ -f "$ts_drop" ]] || : > "$ts_drop"
+
+    include_path=$(printf '%s' "$stage_dir/sshd_config.d/*.conf" | sed 's/[\/&]/\\&/g')
+    sed -i -E "s|^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf|Include ${include_path}|" "$ts_main"
+
+    set_sshd_param "UsePAM" "yes" "$ts_main" && staged_changed=true || true
+    set_sshd_param "KbdInteractiveAuthentication" "yes" "$ts_main" && staged_changed=true || true
+    set_sshd_param "AuthenticationMethods" "publickey,keyboard-interactive" "$ts_main" && staged_changed=true || true
+    set_sshd_param "PasswordAuthentication" "no" "$ts_main" && staged_changed=true || true
+
+    set_sshd_param "ChallengeResponseAuthentication" "yes" "$ts_drop" && staged_changed=true || true
+    set_sshd_param "KbdInteractiveAuthentication" "yes" "$ts_drop" && staged_changed=true || true
+    set_sshd_param "UsePAM" "yes" "$ts_drop" && staged_changed=true || true
+    set_sshd_param "PasswordAuthentication" "no" "$ts_drop" && staged_changed=true || true
+
+    local sshd_check_output
+    sshd_check_output=$(sshd -t -f "$ts_main" 2>&1) || {
+        error "SSHD config syntax check failed — changes NOT applied."
+        [[ -n "$sshd_check_output" ]] && error "$sshd_check_output"
+        rm -rf "$stage_dir" 2>/dev/null || true
+        [[ -f "$tp" ]] && rm -f "$tp" 2>/dev/null || true
+        [[ -f "$pam_file${BACKUP_SUFFIX}" ]] && restore_file "$pam_file" || true
+        return 1
+    }
+
+    if $DRY_RUN; then
+        dry_run_echo "Install staged sshd_config and drop-in, then restart ssh"
+        rm -rf "$stage_dir" 2>/dev/null || true
+    else
+        sed -i -E 's|^[[:space:]]*Include[[:space:]]+/tmp/[^[:space:]]+/sshd_config\.d/\*\.conf([[:space:]]*)$|Include /etc/ssh/sshd_config.d/*.conf|' "$ts_main"
+        cp "$ts_main" "$sc" && chmod 644 "$sc" && log_change "MODIFIED:$sc (2FA)"
+        install -m 644 "$ts_drop" "$ssh_dropin"
+        log_change "MODIFIED:$ssh_dropin (2FA)"
+        rm -rf "$stage_dir" 2>/dev/null || true
+        restart_ssh "2FA" || return 1
+    fi
 
     echo; warn "WICHTIG: SSH in NEUEM Terminal testen bevor dieses geschlossen wird!"
     section_done "4b"
@@ -4694,11 +4925,11 @@ configure_suid_sgid_inventory() {
 
     local tscript tcron tbaseline
     tscript=$(mktemp_tracked)
-    cat > "$tscript" <<SUID_EOF
+    cat > "$tscript" <<'SUID_EOF'
 #!/bin/bash
 set -euo pipefail
-BASELINE_FILE="${SUID_SGID_AUDIT_BASELINE}"
-REPORT_FILE="${SUID_SGID_AUDIT_REPORT}"
+BASELINE_FILE="__SUID_BASELINE__"
+REPORT_FILE="__SUID_REPORT__"
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
 find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -printf '%#m %u %g %p\n' 2>/dev/null | sort > "$TMP_FILE"
@@ -4714,6 +4945,7 @@ fi
     printf '\nCurrent inventory entries: %s\n' "$(wc -l < "$TMP_FILE")"
 } > "$REPORT_FILE"
 SUID_EOF
+    sed -i "s|__SUID_BASELINE__|$SUID_SGID_AUDIT_BASELINE|g; s|__SUID_REPORT__|$SUID_SGID_AUDIT_REPORT|g" "$tscript"
     if install_managed_file "$SUID_SGID_AUDIT_SCRIPT" "$tscript" 700; then
         changed=$((changed+1))
     fi
