@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.3** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.4** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
 Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur nach, wenn Probleme gefunden werden.
 
@@ -50,12 +50,12 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - **Automatisches Audit** von `SystemMaxUse` gegen konfigurierten Zielwert (Standard: 1G)
 - Fragt nur nach, wenn der Wert von der Empfehlung abweicht
 
-### Login-Umask-Härtung *(neu in v3.0.3)*
+### Login-Umask-Härtung *(neu in v3.0.4)*
 - Dienst-sichere Härtung ausschließlich für interaktive Benutzer
 - Konfiguriert `umask 027` in `/etc/login.defs` und `/etc/profile.d/`
 - Assessment prüft Login-Umask-Einstellungen gegen Baseline
 
-### SUID/SGID-Inventarisierung & Auditierung *(neu in v3.0.3)*
+### SUID/SGID-Inventarisierung & Auditierung *(neu in v3.0.4)*
 - Erstellt beim ersten Lauf eine Baseline aller SUID/SGID-Binaries
 - Tägliche Audit-only-Berichterstattung via Cron — keine automatischen Entfernungen
 - Schreibt Inventar nach `/var/lib/security-script/suid_sgid_baseline.txt`
@@ -274,7 +274,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 
 ---
 
-## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.3
+## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.4
 
 - **Empfohlener Modus erweitert** — bietet aktiv Baseline-Fixes für echte ROTE Befunde an, z.B. auditd, AIDE, Login-Umask, SUID/SGID-Baseline und SSH-Krypto-Richtlinie
 - **SSH-Krypto-Richtlinie** — neuer Modus (`off` | `modern` | `fips-compatible`) mit Konfigurationsvalidierung und automatischem Rollback bei Fehlschlag; Assessment unterscheidet zwischen fehlender expliziter Richtlinie und tatsächlich schwachen Algorithmen; empfohlener Modus verwendet standardmäßig `modern`
@@ -286,7 +286,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 - **Assessment-Logik gehärtet** — Sudoers-TTY-Regex korrigiert, auditd-Abhängigkeitsbehandlung verbessert, AppArmor-Aktivprozess-Erkennung korrigiert
 - **SSH-Krypto-Prompt** — akzeptiert Enter/j/ja als empfohlenen Standard und n/nein als Ablehnung
 - **Container-/Workload-Sicherheit** — alle neuen Funktionen sind dienst-bewusst und vermeiden breite Änderungen, die Nextcloud, AdGuard Home, Caddy, Docker oder Podman beeinträchtigen könnten
-- **Übernommen aus v3.0.2**: Sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
+- **Übernommen aus v3.0.3**: Sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
 
 ---
 
