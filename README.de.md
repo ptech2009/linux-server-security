@@ -1,306 +1,306 @@
 # Linux Server Security Script
 
-**Version 3.0.2** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.3** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
-Automatisiert zahlreiche manuelle Konfigurationsaufgaben mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur bei gefundenen Problemen nach.
+Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur nach, wenn Probleme gefunden werden.
 
-## 🔐 Funktionen und Features
+## 🔐 Funktionen
 
-### ✅ SSH-Härtung & -Konfiguration
-- **Überprüfung und Optimierung der SSH-Konfiguration**  
-  Einstellungen wie `PasswordAuthentication`, `PermitRootLogin`, `AllowUsers` und weitere sicherheitsrelevante Parameter werden kontrolliert und angepasst.
-- **Automatisierte Erstellung von SSH-Schlüsselpaaren**  
-  Generierung von Ed25519-Schlüsseln mit der Option, den öffentlichen Schlüssel automatisch in `authorized_keys` einzufügen.
-- **Config-Validierung**  
-  `sshd -t`-Prüfung vor jedem Neustart — gibt bei Fehler die echte Fehlermeldung aus.
-- **Drop-in-Konfiguration** via `/etc/ssh/sshd_config.d/` (modern, nicht-destruktiv).
-- Erkennt keyboard-interactive/2FA-`AuthenticationMethods` und vermeidet das Deaktivieren benötigter Methoden.
-- `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert.
+### SSH-Härtung & Schlüsselverwaltung
+- Prüft und optimiert `sshd_config`-Einstellungen (`PasswordAuthentication`, `PermitRootLogin`, `AllowUsers`, `X11Forwarding`, etc.)
+- Ed25519-Schlüsselpaar-Generierung mit automatischer `authorized_keys`-Einrichtung
+- Konfigurationsvalidierung via `sshd -t` vor jedem Neustart — gibt reale Fehlerausgaben bei Fehlschlag aus
+- Drop-in-Konfiguration via `/etc/ssh/sshd_config.d/` (modern, nicht-destruktiv)
+- Erkennt Keyboard-Interactive/2FA `AuthenticationMethods` und deaktiviert keine erforderlichen Methoden
+- `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert
+- **SSH-Krypto-Richtlinienmodus** (`off` | `modern` | `fips-compatible`) mit Validierung und Rollback bei Fehlschlag
 
-### ✅ Google 2FA (Zwei-Faktor-Authentifizierung)
-- Installation und Konfiguration von Google Authenticator (`libpam-google-authenticator`).
-- Interaktives Setup: QR-Code und Backup-Codes werden direkt im Terminal angezeigt.
-- Automatische Anpassung der PAM- und SSHD-Konfiguration für sicheren 2FA-Login.
+### Google 2FA (Zwei-Faktor-Authentifizierung)
+- Installiert und konfiguriert `libpam-google-authenticator`
+- Interaktive Einrichtung mit QR-Code und Notfall-Scratch-Codes
+- Automatische PAM- und SSHD-Konfiguration
 
-### ✅ Fail2ban (Audit-Modus)
-- **Automatischer Audit** bei installiertem Paket: prüft jail.local, [sshd]-Jail-Status, ignoreip-Whitelist, Service-Zustand.
-- **Minimale jail.local** statt Kopie der großen `jail.conf` mit potenziell inkompatiblen Defaults.
-- **Config-Validierung** via `fail2ban-client -t` vor Restart, mit Restore-Angebot bei Fehler.
-- **Automatisches Whitelisting** lokaler Subnetze zur Vermeidung von Selbst-Aussperrung.
+### Fail2ban (Audit-Modus)
+- **Automatisches Audit** bei Installation: prüft jail.local, [sshd]-Jail-Status, ignoreip-Whitelist, Dienststatus
+- Erstellt minimale `jail.local` (keine Kopie der riesigen `jail.conf`)
+- Konfigurationsvalidierung via `fail2ban-client -t` vor Neustart, mit Wiederherstellung bei Fehlschlag
+- Automatisches Whitelisting lokaler Subnetze zur Vermeidung von Aussperrungen
 
-### ✅ SSHGuard (Audit-Modus)
-- **Automatischer Audit** bei installiertem Paket: prüft Whitelist-Vollständigkeit, Service-Zustand.
-- IPv4/IPv6-Erkennung lokaler Subnetze und automatisches Whitelisting.
+### SSHGuard (Audit-Modus)
+- **Automatisches Audit** bei Installation: prüft Whitelist-Vollständigkeit, Dienststatus
+- IPv4/IPv6-Erkennung lokaler Subnetze und Whitelisting
 
-### ✅ UFW (Uncomplicated Firewall) (Audit-Modus)
-- **Automatischer Audit** bei installiertem Paket: prüft Aktivstatus, SSH-Port-Regel, nicht abgedeckte Listening-Ports.
-- **Port- und Container-Erkennung** via `ss` (Host-Ports) und Docker/Podman (Container-Ports).
-- **SSH-Pre-Allow** vor UFW-Aktivierung gegen Aussperrung.
-- **Interaktive Port-für-Port-Überprüfung** nicht abgedeckter Dienste.
+### UFW Firewall (Audit-Modus)
+- **Automatisches Audit** bei Installation: prüft aktiven Zustand, SSH-Port-Regel, nicht abgedeckte lauschende Ports
+- Erkennt Host-Ports via `ss` und Container-Ports via Docker/Podman
+- SSH-Vorfreischaltung vor UFW-Aktivierung zur Vermeidung von Aussperrungen
+- Interaktive Port-für-Port-Überprüfung für nicht abgedeckte Dienste
 
-### ✅ Sysctl Kernel-Härtung (Audit-Modus)
-- **Automatischer Audit** von 21 Kernel-/Netzwerk-Parametern gegen Best Practices.
-- Umfasst: `rp_filter`, `accept_redirects`, `send_redirects`, `accept_source_route`, `log_martians`, `icmp_echo_ignore_broadcasts`, `tcp_syncookies`, `randomize_va_space`, `sysrq`, `protected_hardlinks/symlinks`.
-- Schreibt nach `/etc/sysctl.d/99-security-script.conf` (keine Änderung an `/etc/sysctl.conf`).
+### Sysctl-Kernel-Härtung (Audit-Modus)
+- **Automatisches Audit** von 21 Kernel-/Netzwerkparametern gegen Best Practices
+- Abdeckung: `rp_filter`, `accept_redirects`, `send_redirects`, `accept_source_route`, `log_martians`, `icmp_echo_ignore_broadcasts`, `tcp_syncookies`, `randomize_va_space`, `sysrq`, `protected_hardlinks/symlinks`
+- Schreibt nach `/etc/sysctl.d/99-security-script.conf` (keine Änderung an `/etc/sysctl.conf`)
 
-### ✅ Sudoers TTY-Ticket-Isolation (Audit-Modus)
-- **Automatischer Audit** ob `tty_tickets` aktiv ist.
-- Stellt sicher, dass sudo-Credentials pro Terminal gelten, nicht sitzungsübergreifend.
-- Validierung mit `visudo -c` vor Anwendung.
+### Sudoers TTY-Ticket-Isolation (Audit-Modus)
+- **Automatisches Audit**, ob `tty_tickets` aktiv ist
+- Stellt sicher, dass sudo-Anmeldedaten pro Terminal gelten, nicht sitzungsübergreifend
+- Validierung mit `visudo` vor der Anwendung
 
-### ✅ Journald Log-Limits (Audit-Modus)
-- **Automatischer Audit** von `SystemMaxUse` gegen konfigurierten Zielwert (Standard: 1G).
-- Fragt nur nach, wenn der Wert von der Empfehlung abweicht.
+### Journald-Protokollbegrenzung (Audit-Modus)
+- **Automatisches Audit** von `SystemMaxUse` gegen konfigurierten Zielwert (Standard: 1G)
+- Fragt nur nach, wenn der Wert von der Empfehlung abweicht
 
-### ✅ ClamAV Antivirus-Integration
-- **Paketinstallation** von `clamav` und `clamav-daemon`, falls noch nicht vorhanden.
-- **Initiales Datenbank-Update** der Virensignaturen via `freshclam`.
-- **Dienstkonfiguration** des `clamav-freshclam`-Dienstes für automatische Signatur-Updates.
+### Login-Umask-Härtung *(neu in v3.0.3)*
+- Dienst-sichere Härtung ausschließlich für interaktive Benutzer
+- Konfiguriert `umask 027` in `/etc/login.defs` und `/etc/profile.d/`
+- Assessment prüft Login-Umask-Einstellungen gegen Baseline
 
-### ✅ Unattended Upgrades
-- **Automatische Sicherheitsupdates** über Unattended Upgrades.
-- Einrichtung von `Allowed-Origins`, Reboot-Zeitplan und E-Mail-Benachrichtigungen.
-- Validierung und Korrektur der periodischen `20auto-upgrades`-Konfiguration.
+### SUID/SGID-Inventarisierung & Auditierung *(neu in v3.0.3)*
+- Erstellt beim ersten Lauf eine Baseline aller SUID/SGID-Binaries
+- Tägliche Audit-only-Berichterstattung via Cron — keine automatischen Entfernungen
+- Schreibt Inventar nach `/var/lib/security-script/suid_sgid_baseline.txt`
+- Berichtet Unterschiede unter `/var/log/security-script-suid-sgid-report.log`
 
-### ✅ PAM-Härtung *(komplett neu geschrieben)*
-- Verwendet `pam-auth-update` (Debian/Ubuntu-nativer Mechanismus) — **kein rohes `sed` auf Live-PAM-Dateien**.
-- `pam_faillock` via `/etc/security/faillock.conf` (moderner, sicherer Ansatz).
-- Passwortqualität via `/etc/security/pwquality.conf`.
-- **Sudo-Smoke-Test nach jeder PAM-Änderung** — automatischer Rollback bei Fehler.
+### ClamAV-Antivirensoftware
+- Installiert `clamav` und `clamav-daemon` falls nicht vorhanden
+- Führt initiales `freshclam`-Datenbankupdate durch
+- Konfiguriert automatische Virendefinitions-Updates
 
-### ✅ auditd (Audit-Framework)
-- Installation und Konfiguration von `auditd` für detaillierte Systemereignis-Aufzeichnung.
-- CIS/BSI-orientierte Regeln in `/etc/audit/rules.d/99-security-script.rules`.
-- Gibt nach dem Setup relevante Log-Pfade und Befehle zur Auswertung aus.
+### Unattended Upgrades
+- Konfiguriert `unattended-upgrades` für automatische Sicherheits-Patches
+- Richtet `Allowed-Origins`, Neustart-Zeitplan und E-Mail-Benachrichtigungen ein
+- Validiert und korrigiert die periodische `20auto-upgrades`-Konfiguration
 
-### ✅ AIDE (Datei-Integritätsüberwachung)
-- Erstellt eine Integritäts-Baseline wichtiger Systemdateien.
-- Lokale Ausschlüsse für volatile Container-/Log-Pfade zur Rauschreduzierung auf Live-Hosts.
-- Automatische tägliche Prüfung via Cron (`/etc/cron.daily/aide-check`).
-- Robuste DB-Erkennung mit `nice`/`ionice`-Unterstützung, nicht-interaktiver Init mit Timeout.
-- Bevorzugt autogenerierte Konfiguration; Cron kann Fallback-Config ohne `update-aide.conf` aktualisieren.
+### PAM-Härtung
+- Verwendet `pam-auth-update` (nativer Debian/Ubuntu-Mechanismus) — **kein rohes `sed` auf live PAM-Dateien**
+- `pam_faillock` via `/etc/security/faillock.conf` (moderner, sicherer Ansatz)
+- Passwortqualitätsdurchsetzung via `/etc/security/pwquality.conf`
+- **Sudo-Smoke-Test nach jeder PAM-Änderung** — automatischer Rollback bei Fehlschlag
 
-### ✅ AppArmor-Durchsetzung
-- Schaltet alle geladenen AppArmor-Profile von Complain- auf Enforce-Modus.
-- Erkennt korrekt teilweise entladene/Teardown-Zustände — keine falschen GREEN-Meldungen.
-- Wird auf Docker/Podman-Hosts standardmäßig übersprungen, sofern nicht explizit erzwungen.
-- Prüft und meldet Profile, die nicht sauber enforced werden können.
+### auditd (Audit-Framework)
+- Installiert und konfiguriert `auditd` für detaillierte Systemereignisaufzeichnung
+- **Erweiterter STIG-Stil-Regelsatz** mit Abdeckung für Sitzungsdateien, Zeitänderungen, Berechtigungsänderungen, Hostnameänderungen, Shell-/Profil-Härtungsdateien, rsyslog, modprobe und GRUB
+- Schreibt Regeln nach `/etc/audit/rules.d/99-security-script.rules`
+- Gibt relevante Log-Speicherorte und Befehle nach der Einrichtung aus
 
-### ✅ Dateisystem-Härtung
-- Setzt sichere Mount-Optionen (`noexec`, `nosuid`, `nodev`) für temporäre Dateisysteme.
-- Reduziert das Risiko, dass Schadcode aus typischen Ablageorten direkt ausgeführt wird.
+### AIDE (Datei-Integritätsüberwachung)
+- Erstellt eine Integritäts-Baseline wichtiger Systemdateien
+- Lokale Ausschlüsse für volatile Container-/Log-Pfade zur Rauschreduzierung auf Live-Hosts
+- Automatische tägliche Prüfung via Cron (`/etc/cron.daily/aide-check`)
+- Robuste DB-Erkennung mit `nice`/`ionice`-Unterstützung und nicht-interaktiver Init mit Timeout
+- Bevorzugt autogenerierte Konfiguration; Cron kann Fallback-Konfiguration ohne `update-aide.conf` aktualisieren
 
-### ✅ Kernel-Modul-Blacklisting
-- Blacklistet ungenutzte oder gefährliche Kernel-Module.
-- Schreibt nach `/etc/modprobe.d/security-script-blacklist.conf`.
+### AppArmor-Durchsetzung
+- Schaltet alle geladenen AppArmor-Profile von Complain- in Enforce-Modus
+- Erkennt korrekt teilweise entladene/Teardown-Zustände — keine falschen GRÜNEN Befunde
+- Standardmäßig übersprungen auf Docker/Podman-Hosts, außer explizit erzwungen
+- Auditiert und meldet Profile, die nicht sauber durchgesetzt werden können
 
-### ✅ Core-Dump-Beschränkung
-- Deaktiviert Core Dumps via `/etc/security/limits.d/` und `sysctl`.
-- Verhindert, dass sensible Prozessdaten unkontrolliert auf die Platte geschrieben werden.
+### Dateisystem-Härtung
+- Wendet sichere Mount-Optionen (`noexec`, `nosuid`, `nodev`) auf temporäre Dateisysteme an
+- Reduziert das Risiko der Ausführung von Schadcode aus häufig genutzten Staging-Pfaden
 
-### ✅ Login-Banner
-- Konfiguriert SSH Pre-Login-Banner (`/etc/issue.net`) mit rechtlichem/organisatorischem Hinweis.
-- Bereinigt `/etc/motd` zur Vermeidung von Informationsabfluss.
+### Kernel-Modul-Blacklisting
+- Sperrt ungenutzte oder gefährliche Kernel-Module
+- Schreibt nach `/etc/modprobe.d/security-script-blacklist.conf`
 
-### ✅ MSMTP Konfiguration
-- **Interaktiver Setup-Assistent** – sowohl benutzerbezogen als auch systemweit.
-- Abfrage von Host, Port, TLS-Modus, Benutzername/Passwort und Absenderadresse.
-- Optionaler Test-E-Mail-Versand.
-- Sicherheitshinweis für GPG/secret-tool Passwortspeicherung.
+### Core-Dump-Beschränkungen
+- Deaktiviert Core Dumps via `/etc/security/limits.d/` und `sysctl`
+- Verhindert unkontrolliertes Schreiben sensibler Prozessdaten auf die Festplatte
 
-### ✅ Backup und Wiederherstellung
-- **Automatisierte Backups** vor jeder Änderung (Suffix `.security_script_backup`).
-- **`list_backups`**: Zeigt alle Backups mit Zeitstempeln an.
-- **`restore_backup_interactive`**: Nummeriertes Menü zur selektiven Wiederherstellung.
-- **Interaktive Backup-Verwaltung** am Skriptende.
+### Login-Banner
+- Konfiguriert SSH-Pre-Login-Banner (`/etc/issue.net`) mit rechtlichem/organisatorischem Hinweis
+- Leert `/etc/motd` zur Vermeidung von Informationslecks
 
-### ✅ Vollständiger Rollback
-- Stellt alle gesicherten Konfigurationsdateien aus dem maschinenlesbaren **Transaktions-Log** wieder her.
-- Entfernt vom Skript installierte Pakete.
-- Entsperrt den Root-Account, falls vom Skript gesperrt.
-- Entfernt alle vom Skript angelegten Dateien und stellt entfernte Cron-Jobs wieder her.
-- Läuft nicht-interaktiv und vollautomatisch.
+### MSMTP-E-Mail-Benachrichtigungen
+- Interaktiver SMTP-Einrichtungsassistent (benutzer- oder systemweit)
+- Unterstützt Host, Port, TLS, Anmeldedaten und Absenderkonfiguration
+- Optionaler Test-E-Mail-Versand
+- Sicherheitshinweis zur GPG/Secret-Tool-Passwortspeicherung
 
-### ✅ Selektives Entfernen
-- Interaktives Erkennungs- und Auswahlmenü für installierte Komponenten.
-- `--remove target1,target2`-Flag für geskripteten Einsatz.
+### Backup & Wiederherstellung
+- Vor-Änderungs-Backups für jede geänderte Konfigurationsdatei
+- `list_backups`: Zeigt alle Backups mit Zeitstempeln
+- `restore_backup_interactive`: Nummeriertes Menü zur selektiven Wiederherstellung
+- Interaktives Backup-Management am Skriptende
 
-### ✅ Log-Viewer *(neu in v3.0.2)*
-- Interaktives Log-Menü, das nach der Härtung aufgerufen werden kann.
-- Zeigt nach jedem Lauf eine Übersicht aller relevanten Log-Dateipfade an.
-- Menüpunkte (0–10):
+### Vollständiger Rollback
+- Stellt alle gesicherten Konfigurationsdateien aus einem maschinenlesbaren **Transaktionslog** wieder her
+- Entfernt vom Skript installierte Pakete
+- Entsperrt Root-Account, falls vom Skript gesperrt
+- Entfernt alle vom Skript hinzugefügten Dateien
+- Stellt entfernte Cron-Jobs wieder her
+- Läuft nicht-interaktiv und vollautomatisch
+
+### Selektive Entfernung
+- Interaktives Erkennungs- und Auswahlmenü für installierte Komponenten
+- `--remove ziel1,ziel2` CLI-Flag für geskriptete Nutzung
+
+### Log-Viewer
+- Eingebautes interaktives Log-Menü nach der Härtung zugänglich
+- Zeigt nach jedem Lauf eine Zusammenfassung aller relevanten Log-Speicherorte
+- Menüeinträge (0–10):
 
 | # | Eintrag |
 |---|---------|
-| 1 | Security-Log-Übersicht (alle relevanten Pfade auf einen Blick) |
-| 2 | AIDE Init-Log |
-| 3 | AIDE Check-Log |
-| 4 | Neuester AIDE-Tagesreport |
-| 5 | Fail2ban Journal |
-| 6 | Fail2ban Status |
-| 7 | auditd Journal |
-| 8 | auditd Rohlog |
+| 1 | Sicherheits-Log-Zusammenfassung (alle relevanten Pfade auf einen Blick) |
+| 2 | AIDE-Init-Log |
+| 3 | AIDE-Prüf-Log |
+| 4 | Neuester täglicher AIDE-Bericht |
+| 5 | Fail2ban-Journal |
+| 6 | Fail2ban-Status |
+| 7 | auditd-Journal |
+| 8 | auditd-Rohlog |
 | 9 | Skript-Änderungslog |
 | 10 | Transaktionslog |
 
-### ✅ Dry-Run Modus
-- **Vorschau-Modus**: Simuliert die Ausführung, ohne Änderungen am System vorzunehmen.
-- Aktivierung:
-  ```bash
-  sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run
-  ```
+### Dry-Run-Modus
+- Vorschau aller Änderungen ohne Systemmodifikation
+- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run`
 
 ---
 
-## 🔄 Audit-Pattern
+## 🔄 Audit-Muster
 
-Sections mit bestehender Installation **überspringen die „Konfigurieren?"-Frage** und starten direkt den Audit. Das Skript prüft jeden Aspekt und meldet:
-
-```
-INFO: 5a. Fail2ban — Audit & Configuration
-SUCCESS: Fail2ban is installed.
-INFO: Auditing Fail2ban configuration...
-SUCCESS: jail.local exists.
-SUCCESS: Jail [sshd] is enabled.
-SUCCESS: Local subnets covered by ignoreip.
-SUCCESS: Fail2ban service is active.
-SUCCESS: Fail2ban service is enabled.
-SUCCESS: Fail2ban audit: All checks passed.
-```
-
-Bei gefundenen Problemen folgt das Muster: **[Issue]** → **Recommendation** → **Fix?**
+Bereiche mit vorhandenen Installationen **überspringen die „X konfigurieren?"-Frage** und starten direkt mit dem Audit. Das Skript prüft jeden Aspekt und meldet:
 
 ```
-WARNING: [Issue] Jail [sshd] is not enabled.
-INFO:   Recommendation: Enable [sshd] jail to protect SSH against brute-force.
-  Fix: Enable [sshd] jail? [Y/n]:
+INFO: 5a. Fail2ban — Audit & Konfiguration
+SUCCESS: Fail2ban ist installiert.
+INFO: Fail2ban-Konfiguration wird geprüft...
+SUCCESS: jail.local vorhanden.
+SUCCESS: Jail [sshd] ist aktiviert.
+SUCCESS: Lokale Subnetze durch ignoreip abgedeckt.
+SUCCESS: Fail2ban-Dienst ist aktiv.
+SUCCESS: Fail2ban-Dienst ist aktiviert.
+SUCCESS: Fail2ban-Audit: Alle Prüfungen bestanden.
 ```
 
-Gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, auditd, Dateisystem, PAM und Login-Banner.
+Bei gefundenen Problemen lautet das Muster: **[Problem]** → **Empfehlung** → **Beheben?**
+
+```
+WARNING: [Problem] Jail [sshd] ist nicht aktiviert.
+INFO:   Empfehlung: [sshd]-Jail aktivieren, um SSH gegen Brute-Force zu schützen.
+  Beheben: [sshd]-Jail aktivieren? [J/n]:
+```
+
+Dies gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, auditd, Dateisystem, PAM, Login-Banner, Login-Umask und SSH-Krypto-Richtlinie.
 
 ---
 
-## 🚀 Installation und Anwendung
+## 🚀 Installation & Verwendung
 
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_2.sh
-sudo ./Linux-Server-Security-Script_v3_0_2.sh
+chmod +x Linux-Server-Security-Script_v3_0_3.sh
+sudo ./Linux-Server-Security-Script_v3_0_3.sh
 ```
 
 ### Startmenü
 
-Beim Start wird ein Modus gewählt (verfügbar auf **Deutsch und Englisch**):
+Beim Start wird einer von sieben Modi gewählt (verfügbar auf **Deutsch und Englisch**):
 
 | # | Modus | Beschreibung |
 |---|-------|--------------|
-| 1 | Nur Prüfung | Audit ohne Änderungen, Exit-Code 2 bei RED-Findings |
-| 2 | Empfohlene Härtung | Wendet Best-Practice-Defaults automatisch an |
-| 3 | Schritt für Schritt | Prüft alle Bereiche einzeln |
+| 1 | Nur Assessment | Audit ohne Änderungen, Exit-Code 2 bei ROTEN Befunden |
+| 2 | Empfohlene Härtung | Wendet Best-Practice-Standardeinstellungen automatisch an, inkl. Baseline-Fixes für echte ROTE Befunde |
+| 3 | Schritt für Schritt | Prüft alle Bereiche einzeln durch |
 | 4 | Vollautomatisch | Liest `security_config.env` |
-| 5 | Vollständiger Rollback | Stellt Vorher-Zustand ohne Rückfragen wieder her |
-| 6 | Selektives Entfernen | Erkennung + interaktives Auswahlmenü |
+| 5 | Vollständiger Rollback | Stellt Vor-Skript-Zustand ohne weitere Rückfragen wieder her |
+| 6 | Selektive Entfernung | Erkennungs- und interaktives Auswahlmenü |
 | 7 | Expertenmodus | Profilauswahl und Sonderfälle |
 
 ### CLI-Flags
 
 ```bash
 # Vorschau ohne Änderungen
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run
 
-# Nur Prüfung (Exit-Code 2 bei verbleibenden RED-Findings)
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --assess
+# Nur Assessment (Exit-Code 2 bei verbleibenden ROTEN Befunden)
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --assess
 
 # Vollständiger Rollback
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --rollback
 
-# Selektives Entfernen
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --remove fail2ban,clamav
+# Selektive Entfernung
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --remove fail2ban,clamav
 
-# Verifikation nach Härtung (Exit-Code 2 bei RED-Findings)
-sudo ./Linux-Server-Security-Script_v3_0_2.sh --verify
+# Verifizierung nach Härtung (Exit-Code 2 bei verbleibenden ROTEN Befunden)
+sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 ```
 
 ### Voraussetzungen
-- Debian/Ubuntu (getestet mit Ubuntu 24.04 LTS, Linux Mint 22)
+- Debian/Ubuntu (getestet auf Ubuntu 24.04 LTS, Linux Mint 22)
 - Bash 4+
 - Root-Rechte
 
 ---
 
-## ✨ Feature-Matrix: Vergleich mit anderen Hardening-Skripten
+## ✨ Feature-Matrix
 
 | Funktion | linux-server-security | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
 |:---------|:---------------------|:-----------------------------|:-----------------------|:---------------------------|
 | Interaktive Benutzerführung | ✅ Ja | 🔶 Teilweise | ❌ Nein | ❌ Nein |
-| Idempotenz (sicher bei Wiederholung) | ✅ Ja | 🔶 Teilweise | ✅ Ja | ✅ Ja |
-| Audit-First-Ansatz | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Idempotent (sicher bei Mehrfachausführung) | ✅ Ja | 🔶 Teilweise | ✅ Ja | ✅ Ja |
+| Audit-First-Muster | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | SSH-Härtung | ✅ Ja | ✅ Ja | ✅ Ja | ✅ Ja |
+| SSH-Krypto-Richtlinie | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
 | Google 2FA-Integration | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Sysctl-Härtung | ✅ Ja (`/etc/sysctl.d/`) | 🔶 Minimal | 🔶 Teilweise | ✅ Ja |
 | Sudoers TTY-Tickets | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
-| UFW Firewall-Management | ✅ Ja | 🔶 Teilweise (iptables) | 🔶 Teilweise | ✅ Ja |
+| UFW-Firewall-Verwaltung | ✅ Ja | 🔶 Teilweise (iptables) | 🔶 Teilweise | ✅ Ja |
 | Container-Port-Erkennung | ✅ Ja (Docker + Podman) | ❌ Nein | ❌ Nein | ❌ Nein |
-| Automatische Updates | ✅ Ja | 🔶 Teilweise | ❌ Nein | ✅ Ja |
+| Unattended Upgrades | ✅ Ja | 🔶 Teilweise | ❌ Nein | ✅ Ja |
 | Fail2ban + SSHGuard | ✅ Ja | ✅ Ja | ❌ Nein | ✅ Ja |
 | ClamAV-Integration | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | PAM-Härtung (sicher, nativ) | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
-| auditd / Audit-Regeln | ✅ Ja | ❌ Nein | ✅ Ja | ✅ Ja |
-| AIDE Datei-Integrität | ✅ Ja | ❌ Nein | ✅ Ja | ❌ Nein |
+| auditd / Audit-Regeln (STIG-erweitert) | ✅ Ja | ❌ Nein | ✅ Ja | ✅ Ja |
+| AIDE-Datei-Integrität | ✅ Ja | ❌ Nein | ✅ Ja | ❌ Nein |
 | AppArmor-Durchsetzung | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
 | Dateisystem-Härtung | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
-| Kernel-Modul-Blacklisting | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
-| Core-Dump-Beschränkung | ✅ Ja | ❌ Nein | ✅ Ja | 🔶 Teilweise |
+| Kernel-Modul-Blacklist | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
+| Core-Dump-Beschränkungen | ✅ Ja | ❌ Nein | ✅ Ja | 🔶 Teilweise |
+| Login-Umask-Härtung | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
+| SUID/SGID-Inventarisierung & Audit | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Login-Banner | ✅ Ja | ❌ Nein | ✅ Ja | ✅ Ja |
-| Config-Backups & Restore | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
-| Vollständiger Rollback + Transaktions-Log | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
-| Selektives Entfernen | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
-| Sprachauswahl beim Start (DE/EN) | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Konfigurations-Backups & Wiederherstellung | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
+| Vollständiger Rollback + Transaktionslog | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Selektive Entfernung | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Startmenü-Sprachauswahl (DE/EN) | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Sudo-Smoke-Test + Auto-Rollback | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
-| Dry-Run Modus | ✅ Ja | 🔶 Minimal | ❌ Nein | 🔶 Teilweise |
-| Kein eval()-Einsatz | ✅ Ja | ❌ Nutzt eval | N/A (InSpec) | N/A (Ansible) |
-
-**Legende**: ✅ Vollständig · 🔶 Eingeschränkt · ❌ Nicht verfügbar
+| Dry-Run-Modus | ✅ Ja | 🔶 Minimal | ❌ Nein | 🔶 Teilweise |
+| Kein eval()-Einsatz | ✅ Ja | ❌ Verwendet eval | N/A (InSpec) | N/A (Ansible) |
 
 ---
 
-## 🔒 Sicherheits- und Qualitätsverbesserungen in v3.0.2
+## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.3
 
-- **Integriertes Log-Viewer-Menü** — interaktives Menü (0–10) nach der Härtung mit direktem Zugriff auf AIDE-, auditd-, Fail2ban-Logs, Skript-Änderungslog und Transaktionslog; Security-Log-Übersicht wird automatisch nach jedem Lauf ausgegeben
-- **AppArmor-Assessment korrigiert** — erkennt korrekt teilweise entladene/Teardown-Zustände statt falsche GREEN-Meldungen
-- **AppArmor auf Docker/Podman-Hosts standardmäßig übersprungen** — sofern nicht explizit erzwungen
-- **SSH-Härtung verbessert** — erkennt keyboard-interactive/2FA-`AuthenticationMethods` und vermeidet das Deaktivieren benötigter Methoden
-- **SSH-Validierung verbessert** — gibt echte `sshd -t`-Fehlermeldungen aus; `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert
-- **Idempotenz-Prüfung im Schritt-für-Schritt-Modus übersprungen** — verhindert versteckte Wiederholungen von Sektionen, die der Nutzer übersprungen hat
-- **AIDE-Fallback korrigiert** — erstellt `aide.conf.autogenerated` korrekt aus `/etc/aide/aide.conf.d/`, führt ausführbare Debian-Snippets aus
-- **AIDE-Ausschlüsse korrigiert** — legt Zielverzeichnisse an und schließt volatile Container-/Log-Pfade für weniger Rauschen auf Live-Hosts ein
-- **AIDE-Init/-Check verbessert** — bevorzugt autogenerierte Config; optionales `nice`/`ionice`; Cron kann Fallback-Config ohne `update-aide.conf` aktualisieren
-- **Selektives Entfernen-Menü korrigiert** — wird jetzt korrekt interaktiv dargestellt und akzeptiert Auswahlen zuverlässig
-- **PAM-Härtung** — verwendet `pam-auth-update` (Debian/Ubuntu-nativ), kein rohes `sed` auf Live-PAM-Dateien; `pam_faillock` via `/etc/security/faillock.conf`
-- **Sudo-Smoke-Test** nach jeder PAM-Änderung — automatischer Rollback, falls `sudo` nicht mehr funktioniert
-- **Vollständiger Rollback-Modus** (`--rollback`) — maschinenlesbares Transaktions-Log ermöglicht vollständige Systemwiederherstellung
-- **Startmenü 1–7** mit Sprachauswahl (Deutsch/Englisch) beim Start
-- **Sicherer Config-Parser** — kein `source`/`eval` zum Einlesen von Konfigurationsdateien
-- **`--verify`-Flag** — Exit-Code 2 bei verbleibenden RED-Findings nach Härtung (CI/CD-kompatibel)
-- **Tmpfile-Cleanup auf EXIT-Trap** — keine temporären Dateien bei Abbruch
-- **`set -uo pipefail`** — strikte Fehlerbehandlung ohne `set -e` (das bei grep zu falschen Abbrüchen führte)
-- **Kein `eval()`-Einsatz** — alle Befehle über sichere Array-basierte `run_cmd()`-Funktion
-- **Config-Validierung vor Neustarts** — `sshd -t`, `fail2ban-client -t`, `visudo -c` verhindern fehlerhafte Konfigurationen
+- **Empfohlener Modus erweitert** — bietet aktiv Baseline-Fixes für echte ROTE Befunde an, z.B. auditd, AIDE, Login-Umask, SUID/SGID-Baseline und SSH-Krypto-Richtlinie
+- **SSH-Krypto-Richtlinie** — neuer Modus (`off` | `modern` | `fips-compatible`) mit Konfigurationsvalidierung und automatischem Rollback bei Fehlschlag; Assessment unterscheidet zwischen fehlender expliziter Richtlinie und tatsächlich schwachen Algorithmen; empfohlener Modus verwendet standardmäßig `modern`
+- **Login-Umask-Härtung** — dienst-sichere Härtung ausschließlich für interaktive Benutzer via `/etc/login.defs` und `/etc/profile.d/`; Assessment prüft gleichwertige Shell-Hook-Speicherorte
+- **SUID/SGID-Inventarisierung** — Baseline-Generierung beim ersten Lauf; tägliche Audit-only-Cron-Berichterstattung; TMP_FILE-Expansion-Bug und leeres Cron-Target-Skript behoben
+- **auditd-Regelsatz erweitert** — STIG-Stil-Abdeckung für Sitzungsdateien, Zeitänderungen, Berechtigungsänderungen, Hostnameänderungen, Shell-/Profil-Härtungsdateien, rsyslog, modprobe und GRUB
+- **Assessment erweitert** — prüft jetzt SSH-Krypto-Richtlinie, Login-Umask, SUID/SGID-Baseline-Abdeckung und erweiterte auditd-Abdeckung
+- **Idempotenz-Nachweis** — plant jetzt nur noch für tatsächlich im Lauf ausgeführte Bereiche; im Schritt-für-Schritt-Modus für übersprungene Bereiche deaktiviert
+- **Assessment-Logik gehärtet** — Sudoers-TTY-Regex korrigiert, auditd-Abhängigkeitsbehandlung verbessert, AppArmor-Aktivprozess-Erkennung korrigiert
+- **SSH-Krypto-Prompt** — akzeptiert Enter/j/ja als empfohlenen Standard und n/nein als Ablehnung
+- **Container-/Workload-Sicherheit** — alle neuen Funktionen sind dienst-bewusst und vermeiden breite Änderungen, die Nextcloud, AdGuard Home, Caddy, Docker oder Podman beeinträchtigen könnten
+- **Übernommen aus v3.0.2**: Sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
 
 ---
 
 ## 📢 Hinweise
 
-- Abdeckt eine **CIS/BSI-orientierte Baseline** für Debian/Ubuntu ohne übermäßigen Compliance-Aufwand.
-- Ideal geeignet für **Root-Server**, **VPS**, **Home Labs** und **private Clouds**.
-- **Leichtgewichtig**, **modular** und **voll interaktiv**.
-- Backups werden automatisch erstellt, dennoch empfiehlt sich ein separates Backup vor kritischen Änderungen.
+- Deckt eine **CIS/BSI-orientierte Baseline** für Debian/Ubuntu ohne schweren Compliance-Overhead ab
+- Ideal für **Root-Server**, **VPS**, **Home Labs** und **Private Clouds**
+- Leichtgewichtig, modular und vollständig interaktiv
+- Backups werden automatisch erstellt, aber eigene Backups vor kritischen Änderungen werden empfohlen
 
 ## 📄 Lizenz
 
-Dieses Projekt steht unter der MIT License — Details in der [LICENSE](LICENSE)-Datei.
+MIT-Lizenz — siehe [LICENSE](LICENSE) für Details.
 
-## 🤝 Beiträge und Feedback
+## 🤝 Beiträge & Feedback
 
-Beiträge in Form von Issues, Pull Requests oder direktem Feedback helfen, das Skript weiter zu verbessern und an verschiedene Einsatzszenarien anzupassen. Jede Unterstützung ist willkommen!
+Vorschläge, Fehlerberichte und Pull Requests sind willkommen. Jeder Beitrag hilft, das Skript zu verbessern!
