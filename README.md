@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.3** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+**Version 3.0.4** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
 
 Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
 
@@ -50,12 +50,12 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - **Auto-audits** `SystemMaxUse` against configured target (default: 1G)
 - Only prompts if the value differs from the recommendation
 
-### Login Umask Hardening *(new in v3.0.3)*
+### Login Umask Hardening *(new in v3.0.4)*
 - Service-safe hardening for interactive users only
 - Configures `umask 027` in `/etc/login.defs` and `/etc/profile.d/`
 - Assessment checks login umask settings against baseline
 
-### SUID/SGID Inventory & Auditing *(new in v3.0.3)*
+### SUID/SGID Inventory & Auditing *(new in v3.0.4)*
 - Creates a baseline of all SUID/SGID binaries on first run
 - Daily audit-only reporting via cron — no automatic removals
 - Writes inventory to `/var/lib/security-script/suid_sgid_baseline.txt`
@@ -274,7 +274,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.3
+## 🔒 Security & Quality Improvements in v3.0.4
 
 - **Recommended mode enhanced** — actively offers baseline fixes for real RED findings such as auditd, AIDE, login umask, SUID/SGID baseline, and SSH crypto policy
 - **SSH crypto policy** — new mode (`off` | `modern` | `fips-compatible`) with config validation and automatic rollback on failure; assessment differentiates between missing explicit policy and actually weak algorithms; recommended mode defaults to `modern`
@@ -286,7 +286,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 - **Assessment logic hardened** — sudoers TTY regex fixed, auditd dependency handling improved, AppArmor active-process awareness corrected
 - **SSH crypto prompt** — accepts Enter/y/yes as the recommended default and n/no as opt-out
 - **Container/workload safety** — all new additions are service-aware and avoid broad changes that could break Nextcloud, AdGuard Home, Caddy, Docker, or Podman workloads
-- **RETAINED from v3.0.2**: Safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
+- **RETAINED from v3.0.3**: Safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
 
 ---
 
