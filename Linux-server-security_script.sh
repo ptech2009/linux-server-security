@@ -2,10 +2,16 @@
 
 # ============================================================================
 # Linux Server Security Script
-# Version: 3.0.4
+# Version: 3.0.5
 # Author: Paul Schumacher
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
+#
+# Changelog v3.0.5:
+# - NEW v3.0.5: Added strict SSH crypto policy mode (strict) for explicit Ciphers/MACs/KEX pinning
+# - NEW v3.0.5: Upgraded UMASK hardening from interactive-only to a system-wide baseline using login.defs, shell hook and systemd drop-ins
+# - IMPROVED v3.0.5: Assessment now treats missing strict SSH crypto pinning as a finding and validates system-wide umask coverage
+# - IMPROVED v3.0.5: Rollback and selective remove now fully revert SSH strict crypto policy and system-wide umask drop-ins
 #
 # Changelog v3.0.4:
 # - IMPROVED v3.0.4: Recommended mode now actively offers baseline fixes for real RED findings
@@ -20,12 +26,12 @@
 # - IMPROVED v3.0.4: Context-aware optional skips in recommended mode now only suppress non-baseline extras
 #
 # Changelog v3.0.4:
-# - NEW: Service-safe login umask hardening for interactive users only (/etc/login.defs + /etc/profile.d)
+# - NEW: System-wide default umask hardening for logins and future systemd-managed services/users (/etc/login.defs + /etc/profile.d)
 # - NEW: SSH crypto policy mode (off | modern | fips-compatible) with validation + rollback on failure
 # - NEW: SUID/SGID inventory baseline + daily audit-only reporting (no automatic removals)
 # - IMPROVED: auditd ruleset expanded with STIG-style coverage for session files, time change,
 #   permission changes, hostname changes, shell/profile hardening files, rsyslog, modprobe and GRUB
-# - IMPROVED: Assessment now checks SSH crypto policy, login umask, SUID/SGID baseline coverage
+# - IMPROVED: Assessment now checks strict SSH crypto policy, system-wide umask, SUID/SGID baseline coverage
 #   and extended auditd coverage in addition to the existing baseline checks
 # - IMPROVED: All Mil/Gov-oriented additions are service-aware by default and avoid broad changes
 #   that could break Nextcloud, AdGuard Home, Caddy, Docker or Podman workloads
@@ -41,7 +47,7 @@ set -uo pipefail
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-readonly SCRIPT_VERSION="3.0.4"
+readonly SCRIPT_VERSION="3.0.5"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
@@ -56,6 +62,8 @@ readonly FAILLOCK_CONF="/etc/security/faillock.conf"
 readonly PWQUALITY_CONF="/etc/security/pwquality.conf"
 readonly LOGIN_DEFS_FILE="/etc/login.defs"
 readonly PROFILE_UMASK_FILE="/etc/profile.d/99-security-script-umask.sh"
+readonly SYSTEM_UMASK_SYSTEMD_DROPIN="/etc/systemd/system.conf.d/99-security-script-umask.conf"
+readonly USER_UMASK_SYSTEMD_DROPIN="/etc/systemd/user.conf.d/99-security-script-umask.conf"
 readonly DEFAULT_LOGIN_UMASK="027"
 readonly SUID_SGID_AUDIT_SCRIPT="/usr/local/sbin/security-script-suid-sgid-inventory.sh"
 readonly SUID_SGID_AUDIT_BASELINE="/var/lib/security-script/suid_sgid_baseline.txt"
@@ -819,7 +827,7 @@ install_managed_file() {
 list_script_managed_files() {
     printf '%s\n' \
         "$SYSCTL_CONFIG_FILE" "$SUDOERS_TTY_FILE" "$MODPROBE_BLACKLIST" "$LIMITS_CONF" "$FAILLOCK_CONF" "$PWQUALITY_CONF" \
-        "$LOGIN_DEFS_FILE" "$PROFILE_UMASK_FILE" "$SUID_SGID_AUDIT_SCRIPT" "$SUID_SGID_AUDIT_BASELINE" "$SUID_SGID_AUDIT_REPORT" "$SUID_SGID_AUDIT_CRON" \
+        "$LOGIN_DEFS_FILE" "$PROFILE_UMASK_FILE" "$SYSTEM_UMASK_SYSTEMD_DROPIN" "$USER_UMASK_SYSTEMD_DROPIN" "$SUID_SGID_AUDIT_SCRIPT" "$SUID_SGID_AUDIT_BASELINE" "$SUID_SGID_AUDIT_REPORT" "$SUID_SGID_AUDIT_CRON" \
         "$BANNER_FILE" "$MOTD_FILE" "$AIDE_CRON" "$AIDE_LOCAL_EXCLUDES" "$AUDITD_RULES" "$SSHD_HARDENING_DROPIN" "$SSHD_HARDENING_DROPIN_LEGACY" \
         "/etc/systemd/journald.conf" "/etc/ssh/sshd_config"
 }
@@ -1419,6 +1427,46 @@ interactive_umask_shell_hook_present() {
     grep -qE '^[[:space:]]*umask[[:space:]]+0?(27|77)([[:space:]]|$)' "$PROFILE_UMASK_FILE" /etc/profile /etc/bash.bashrc 2>/dev/null
 }
 
+get_systemd_default_umask_from_file() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    awk -F'=' '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*DefaultUMask[[:space:]]*=/ {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            value=$2
+        }
+        END { if (value != "") print value; else exit 1 }
+    ' "$file" 2>/dev/null
+}
+
+normalize_csv_values() {
+    local raw="$1"
+    awk -v input="$raw" 'BEGIN {
+        n=split(input, a, ",")
+        for (i=1; i<=n; i++) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i])
+            if (a[i] == "") continue
+            if (out != "") out = out ","
+            out = out a[i]
+        }
+        print out
+    }'
+}
+
+ssh_effective_policy_matches_mode() {
+    local mode="$1" line key expected actual
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        key="${line%% *}"
+        expected="${line#* }"
+        actual=$(get_effective_sshd_config "$key" 2>/dev/null || true)
+        [[ -n "$actual" ]] || return 1
+        [[ "$(normalize_csv_values "$actual")" == "$(normalize_csv_values "$expected")" ]] || return 1
+    done < <(get_ssh_crypto_policy_values "$mode")
+    return 0
+}
+
 apparmor_numeric_count() {
     local pattern="$1"
     aa-status 2>/dev/null | awk -v pat="$pattern" '$0 ~ pat { print $1; found=1; exit } END { if (!found) print 0 }'
@@ -1592,6 +1640,13 @@ octal_umask_is_restrictive_enough() {
 get_ssh_crypto_policy_values() {
     local mode="$1"
     case "$mode" in
+        strict)
+            cat <<'POLICY_EOF'
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+POLICY_EOF
+            ;;
         modern)
             cat <<'POLICY_EOF'
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
@@ -2476,7 +2531,7 @@ component_is_removable() {
             [[ -f "$FAILLOCK_CONF" ]] && grep -qE '^\s*(deny|unlock_time|even_deny_root)\s*=' "$FAILLOCK_CONF" 2>/dev/null && return 0
             [[ -f "$TRANSACTION_LOG" ]] && grep -q "|ROOT_LOCKED|" "$TRANSACTION_LOG" && return 0
             return 1 ;;
-        login_umask|umask)
+        login_umask|umask|system_umask)
             [[ -f "${LOGIN_DEFS_FILE}${BACKUP_SUFFIX}" || -f "${PROFILE_UMASK_FILE}${BACKUP_SUFFIX}" ]] && return 0
             [[ -f "$PROFILE_UMASK_FILE" ]] && return 0
             [[ -f "$LOGIN_DEFS_FILE" ]] && awk '$1 == "UMASK" {print $2}' "$LOGIN_DEFS_FILE" 2>/dev/null | tail -n 1 | grep -qxE '0?27|0?77' && return 0
@@ -2530,7 +2585,7 @@ component_menu_description() {
         auditd|audit) echo "auditd Regeln und ggf. Paket" ;;
         aide) echo "AIDE Cronjob / Baseline / ggf. Paket" ;;
         pam|pam_hardening) echo "PAM pwquality / faillock / Root-Unlock" ;;
-        login_umask|umask) echo "Interaktive Login-UMASK" ;;
+        login_umask|umask|system_umask) echo "Interaktive Login-UMASK" ;;
         suid_sgid|suidsgid) echo "SUID/SGID Baseline / Daily Audit" ;;
         sysctl) echo "Security Sysctl-Konfiguration" ;;
         journald) echo "Journald Log-Limit-Konfiguration" ;;
@@ -2750,7 +2805,7 @@ component_hidden_reason() {
         auditd|audit) echo "auditd-Regeln/Paket aktuell nicht vorhanden" ;;
         aide) echo "AIDE-Paket/Baseline aktuell nicht vorhanden" ;;
         pam|pam_hardening) echo "kein verwalteter PAM-Rückbauzustand erkannt" ;;
-        login_umask|umask) echo "keine verwaltete Login-UMASK erkannt" ;;
+        login_umask|umask|system_umask) echo "keine verwaltete Login-UMASK erkannt" ;;
         suid_sgid|suidsgid) echo "keine SUID/SGID-Baseline erkannt" ;;
         sysctl) echo "keine verwaltete Sysctl-Datei erkannt" ;;
         journald) echo "keine verwaltete Journald-Konfiguration erkannt" ;;
@@ -3093,11 +3148,27 @@ rollback_pam_component() {
 rollback_login_umask_component() {
     info "${C_BOLD}Selective rollback: login_umask${C_RESET}"
     restore_file "$LOGIN_DEFS_FILE"
+
     if [[ -f "${PROFILE_UMASK_FILE}${BACKUP_SUFFIX}" ]]; then
         restore_file "$PROFILE_UMASK_FILE"
     elif [[ -f "$PROFILE_UMASK_FILE" ]]; then
-        rm -f "$PROFILE_UMASK_FILE"             && success "  ✔ Removed interactive login umask profile."             || warn "  Could not remove interactive login umask profile."
+        rm -f "$PROFILE_UMASK_FILE"             && success "  ✔ Removed shell umask hook."             || warn "  Could not remove shell umask hook."
     fi
+
+    if [[ -f "${SYSTEM_UMASK_SYSTEMD_DROPIN}${BACKUP_SUFFIX}" ]]; then
+        restore_file "$SYSTEM_UMASK_SYSTEMD_DROPIN"
+    elif [[ -f "$SYSTEM_UMASK_SYSTEMD_DROPIN" ]]; then
+        rm -f "$SYSTEM_UMASK_SYSTEMD_DROPIN"             && success "  ✔ Removed systemd system umask drop-in."             || warn "  Could not remove systemd system umask drop-in."
+    fi
+
+    if [[ -f "${USER_UMASK_SYSTEMD_DROPIN}${BACKUP_SUFFIX}" ]]; then
+        restore_file "$USER_UMASK_SYSTEMD_DROPIN"
+    elif [[ -f "$USER_UMASK_SYSTEMD_DROPIN" ]]; then
+        rm -f "$USER_UMASK_SYSTEMD_DROPIN"             && success "  ✔ Removed systemd user umask drop-in."             || warn "  Could not remove systemd user umask drop-in."
+    fi
+
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+    info "  Existing services keep their current umask until restart/reboot; assessment should turn RED again immediately because the managed baseline was removed."
 }
 
 rollback_suid_sgid_component() {
@@ -3224,7 +3295,7 @@ run_selective_removal() {
             auditd|audit)                 rollback_auditd_component || errors=$((errors+1)) ;;
             aide)                         rollback_aide_component || errors=$((errors+1)) ;;
             pam|pam_hardening)            rollback_pam_component || errors=$((errors+1)) ;;
-            login_umask|umask)            rollback_login_umask_component || errors=$((errors+1)) ;;
+            login_umask|umask|system_umask) rollback_login_umask_component || errors=$((errors+1)) ;;
             suid_sgid|suidsgid)           rollback_suid_sgid_component || errors=$((errors+1)) ;;
             sysctl)                       rollback_sysctl_component || errors=$((errors+1)) ;;
             journald)                     rollback_journald_component || errors=$((errors+1)) ;;
@@ -3380,6 +3451,8 @@ run_full_rollback() {
         "$SUDOERS_TTY_FILE"
         "$MODPROBE_BLACKLIST"
         "$LIMITS_CONF"
+        "$SYSTEM_UMASK_SYSTEMD_DROPIN"
+        "$USER_UMASK_SYSTEMD_DROPIN"
         "$AIDE_CRON"
         "$AIDE_LOCAL_EXCLUDES"
         "$AUDITD_RULES"
@@ -3520,9 +3593,12 @@ run_assessment() {
 
     local ssh_ciphers ssh_macs ssh_kex ssh_weak_ciphers ssh_weak_macs ssh_weak_kex
     local -a ssh_crypto_issues=()
+    local strict_policy_managed=false strict_policy_effective=false
     ssh_ciphers=$(get_effective_sshd_config "Ciphers" 2>/dev/null || true)
     ssh_macs=$(get_effective_sshd_config "MACs" 2>/dev/null || true)
     ssh_kex=$(get_effective_sshd_config "KexAlgorithms" 2>/dev/null || true)
+    [[ -f "$SSHD_HARDENING_DROPIN" ]] && grep -qiE '^# Optional Mil/Gov-oriented SSH crypto policy mode:[[:space:]]*strict([[:space:]]|$)' "$SSHD_HARDENING_DROPIN" 2>/dev/null && strict_policy_managed=true
+    ssh_effective_policy_matches_mode strict && strict_policy_effective=true || true
     if [[ -z "$ssh_ciphers" || -z "$ssh_macs" || -z "$ssh_kex" ]]; then
         ssh_crypto_issues+=("policy-not-explicit")
     fi
@@ -3532,12 +3608,14 @@ run_assessment() {
     [[ -n "$ssh_weak_ciphers" ]] && ssh_crypto_issues+=("weak-cipher:${ssh_weak_ciphers}")
     [[ -n "$ssh_weak_macs" ]] && ssh_crypto_issues+=("weak-mac:${ssh_weak_macs}")
     [[ -n "$ssh_weak_kex" ]] && ssh_crypto_issues+=("weak-kex:${ssh_weak_kex}")
-    if (( ${#ssh_crypto_issues[@]} == 0 )); then
-        record_check "SSH_CRYPTO_POLICY" "PASS" "SSH crypto policy avoids CBC/SHA1/legacy DH"
-    elif (( ${#ssh_crypto_issues[@]} == 1 )) && [[ "${ssh_crypto_issues[0]}" == "policy-not-explicit" ]]; then
-        record_check "SSH_CRYPTO_POLICY" "INFO" "SSH defaults may be acceptable, but no explicit crypto policy is pinned"
-    else
+    if (( ${#ssh_crypto_issues[@]} > 0 )); then
         record_check "SSH_CRYPTO_POLICY" "FAIL" "SSH crypto policy issue(s): ${ssh_crypto_issues[*]}"
+    elif $strict_policy_managed && $strict_policy_effective; then
+        record_check "SSH_CRYPTO_POLICY" "PASS" "Strict SSH crypto policy pinned (Ciphers/MACs/KEX)"
+    elif $strict_policy_effective; then
+        record_check "SSH_CRYPTO_POLICY" "PASS" "Strict SSH crypto policy effective"
+    else
+        record_check "SSH_CRYPTO_POLICY" "FAIL" "Strict SSH crypto policy not pinned/effective"
     fi
     ssh_google_2fa_assessment
 
@@ -3744,15 +3822,16 @@ run_assessment() {
     # sudoers tty tickets
     sudoers_has_tty_tickets         && record_check "SUDOERS_TTY"      "PASS" "tty_tickets configured"         || record_check "SUDOERS_TTY"      "FAIL" "tty_tickets not set"
 
-    # Login umask
-    local login_umask
+    # System-wide default umask
+    local login_umask systemd_system_umask systemd_user_umask profile_hook_state
     login_umask=$(awk '$1 == "UMASK" {print $2}' "$LOGIN_DEFS_FILE" 2>/dev/null | tail -n 1)
-    if octal_umask_is_restrictive_enough "$login_umask" && interactive_umask_shell_hook_present; then
-        record_check "LOGIN_UMASK" "PASS" "Interactive login umask hardened (${login_umask})"
-    elif octal_umask_is_restrictive_enough "$login_umask"; then
-        record_check "LOGIN_UMASK" "INFO" "Restrictive login.defs umask present (${login_umask}), but no dedicated shell hook was found"
+    systemd_system_umask=$(get_systemd_default_umask_from_file "$SYSTEM_UMASK_SYSTEMD_DROPIN" 2>/dev/null || true)
+    systemd_user_umask=$(get_systemd_default_umask_from_file "$USER_UMASK_SYSTEMD_DROPIN" 2>/dev/null || true)
+    interactive_umask_shell_hook_present && profile_hook_state="present" || profile_hook_state="missing"
+    if octal_umask_is_restrictive_enough "$login_umask"        && octal_umask_is_restrictive_enough "$systemd_system_umask"        && octal_umask_is_restrictive_enough "$systemd_user_umask"        && interactive_umask_shell_hook_present; then
+        record_check "LOGIN_UMASK" "PASS" "System-wide default umask hardened (login.defs=${login_umask}, systemd-system=${systemd_system_umask}, systemd-user=${systemd_user_umask})"
     else
-        record_check "LOGIN_UMASK" "FAIL" "Interactive login umask not hardened (login.defs='${login_umask:-unset}')"
+        record_check "LOGIN_UMASK" "FAIL" "System-wide default umask incomplete (login.defs=${login_umask:-unset}, shell-hook=${profile_hook_state}, systemd-system=${systemd_system_umask:-unset}, systemd-user=${systemd_user_umask:-unset})"
     fi
 
     # SUID/SGID inventory baseline
@@ -4208,25 +4287,26 @@ configure_ssh_hardening() {
     fi
 
     local ssh_crypto_policy_default="off"
-    $INTERACTIVE_RECOMMENDED_MODE && ssh_crypto_policy_default="modern"
+    $INTERACTIVE_RECOMMENDED_MODE && ssh_crypto_policy_default="strict"
+    [[ "$ACTIVE_PROFILE" == "strict" && "$ssh_crypto_policy_default" == "off" ]] && ssh_crypto_policy_default="strict"
     local ssh_crypto_policy_mode="${AUTO_SSH_CRYPTO_POLICY:-$ssh_crypto_policy_default}"
     if ! $AUTO_MODE; then
         echo
         info "Optional Mil/Gov enhancement: explicit SSH crypto policy pinning."
         info "This only affects SSH client compatibility, not web services such as Nextcloud, Caddy or AdGuard Home."
         if $rec_delta_mode && $ssh_crypto_red && ! $noncrypto_ssh_pending; then
-            info "The recommended SSH crypto policy removes weak SSH MACs and keeps good compatibility with current OpenSSH clients. This is the safest default for most servers."
-            info "Choose 'yes' to apply the recommended 'modern' policy. Choose 'no' to leave the current SSH crypto settings unchanged."
-            if ask_yes_no "Apply recommended SSH crypto policy ('modern')?" "y"; then
-                ssh_crypto_policy_mode="modern"
+            info "The recommended SSH crypto policy pins a strict SSH algorithm set for Ciphers, MACs and KEX. This is closer to a Mil/Gov-oriented baseline, but can break older SSH clients."
+            info "Choose 'yes' to apply the recommended 'strict' policy. Choose 'no' to leave the current SSH crypto settings unchanged."
+            if ask_yes_no "Apply recommended SSH crypto policy ('strict')?" "y"; then
+                ssh_crypto_policy_mode="strict"
                 mark_section_executed
             else
                 ssh_crypto_policy_mode="off"
             fi
         else
-            $INTERACTIVE_RECOMMENDED_MODE && info "Recommended mode default: 'modern' (safe baseline for current SSH clients)."
-            info "'modern' removes weak SSH crypto while keeping broad compatibility. 'fips-compatible' is stricter and can break older clients; choose it only when you explicitly need FIPS-oriented behavior."
-            read -rp "SSH crypto policy [off/modern/fips-compatible] (default: ${ssh_crypto_policy_default}): " ssh_crypto_policy_mode </dev/tty
+            $INTERACTIVE_RECOMMENDED_MODE && info "Recommended mode default: 'strict' (stronger Mil/Gov-style baseline for current OpenSSH clients)."
+            info "'strict' is the strongest built-in baseline and may break older SSH clients. 'modern' is slightly more compatible, 'fips-compatible' is for FIPS-oriented environments."
+            read -rp "SSH crypto policy [off/strict/modern/fips-compatible] (default: ${ssh_crypto_policy_default}): " ssh_crypto_policy_mode </dev/tty
         fi
         ssh_crypto_policy_mode="${ssh_crypto_policy_mode:-$ssh_crypto_policy_default}"
     fi
@@ -4234,7 +4314,7 @@ configure_ssh_hardening() {
         "") ssh_crypto_policy_mode="$ssh_crypto_policy_default" ;;
         y|yes) ssh_crypto_policy_mode="$ssh_crypto_policy_default" ;;
         n|no) ssh_crypto_policy_mode="off" ;;
-        off|modern|fips-compatible) ssh_crypto_policy_mode="$(echo "$ssh_crypto_policy_mode" | tr '[:upper:]' '[:lower:]')" ;;
+        off|strict|modern|fips-compatible) ssh_crypto_policy_mode="$(echo "$ssh_crypto_policy_mode" | tr '[:upper:]' '[:lower:]')" ;;
         *) warn "Invalid SSH crypto policy '$ssh_crypto_policy_mode' — using default '$ssh_crypto_policy_default'."; ssh_crypto_policy_mode="$ssh_crypto_policy_default" ;;
     esac
 
@@ -4371,7 +4451,11 @@ configure_ssh_hardening() {
                     if [[ ${#changes_to_apply[@]} -gt 0 ]]; then
                         record_check "SSH_HARDENING" "FIXED" "${#changes_to_apply[@]} parameter(s) hardened"
                         if [[ "$ssh_crypto_policy_mode" != "off" ]]; then
-                            record_check "SSH_CRYPTO_POLICY" "FIXED" "Explicit SSH crypto policy applied (${ssh_crypto_policy_mode})"
+                            if [[ "$ssh_crypto_policy_mode" == "strict" ]]; then
+                            record_check "SSH_CRYPTO_POLICY" "FIXED" "Strict SSH crypto policy applied (${ssh_crypto_policy_mode})"
+                        else
+                            record_check "SSH_CRYPTO_POLICY" "INFO" "Explicit SSH crypto policy applied, but not in strict mode (${ssh_crypto_policy_mode})"
+                        fi
                         fi
                     else
                         record_check "SSH_HARDENING" "PASS" "Existing secure settings normalized into managed drop-in"
@@ -4383,7 +4467,13 @@ configure_ssh_hardening() {
             else
                 success "SSH hardening drop-in already correct."
                 record_check "SSH_HARDENING" "PASS" "All parameters already managed"
-                [[ "$ssh_crypto_policy_mode" != "off" ]] && record_check "SSH_CRYPTO_POLICY" "PASS" "Explicit SSH crypto policy already managed (${ssh_crypto_policy_mode})"
+                [[ "$ssh_crypto_policy_mode" != "off" ]] && {
+                    if [[ "$ssh_crypto_policy_mode" == "strict" ]]; then
+                        record_check "SSH_CRYPTO_POLICY" "PASS" "Strict SSH crypto policy already managed (${ssh_crypto_policy_mode})"
+                    else
+                        record_check "SSH_CRYPTO_POLICY" "INFO" "Explicit SSH crypto policy already managed, but not in strict mode (${ssh_crypto_policy_mode})"
+                    fi
+                }
             fi
         }
     else
@@ -4867,10 +4957,10 @@ Defaults tty_tickets
 # SECTION 10a: Interactive login umask
 # ============================================================================
 configure_login_umask() {
-    info "${C_BOLD}10a. Interactive login umask${C_RESET}"
-    info "Hardens default permissions for interactive user sessions only — not for systemd services or containers."
+    info "${C_BOLD}10a. System-wide default umask${C_RESET}"
+    info "Hardens default permissions for interactive logins and future systemd-managed services/users. Existing running services keep their current umask until restart/reboot."
     is_section_skipped "login_umask" && { info "Skipped."; record_check "LOGIN_UMASK" "SKIP" "Skipped via config"; echo; return 0; }
-    ask_yes_no "Configure restrictive login umask for interactive users only?" "y" || { record_check "LOGIN_UMASK" "SKIP" "User skipped"; echo; return 0; }
+    ask_yes_no "Configure restrictive system-wide default umask?" "y" || { record_check "LOGIN_UMASK" "SKIP" "User skipped"; echo; return 0; }
     mark_section_executed
 
     local desired_umask="${AUTO_LOGIN_UMASK:-$DEFAULT_LOGIN_UMASK}"
@@ -4878,7 +4968,7 @@ configure_login_umask() {
     desired_umask=$(normalize_octal_umask "$desired_umask")
 
     local changed=0
-    local tlogin tprofile
+    local tlogin tprofile tsystemd_system tsystemd_user
     tlogin=$(mktemp_tracked)
     if [[ -f "$LOGIN_DEFS_FILE" ]]; then
         cp "$LOGIN_DEFS_FILE" "$tlogin"
@@ -4893,18 +4983,39 @@ configure_login_umask() {
     tprofile=$(mktemp_tracked)
     cat > "$tprofile" <<UMASK_EOF
 # security-script.sh v${SCRIPT_VERSION}
-# Restrictive default permissions for interactive shells only.
-# This file intentionally does NOT alter systemd service umask values.
+# Restrictive default permissions for interactive shells.
 umask ${desired_umask}
 UMASK_EOF
     if install_managed_file "$PROFILE_UMASK_FILE" "$tprofile" 644; then
         changed=$((changed+1))
     fi
 
+    tsystemd_system=$(mktemp_tracked)
+    cat > "$tsystemd_system" <<UMASK_EOF
+# security-script.sh v${SCRIPT_VERSION}
+[Manager]
+DefaultUMask=${desired_umask}
+UMASK_EOF
+    if install_managed_file "$SYSTEM_UMASK_SYSTEMD_DROPIN" "$tsystemd_system" 644; then
+        changed=$((changed+1))
+    fi
+
+    tsystemd_user=$(mktemp_tracked)
+    cat > "$tsystemd_user" <<UMASK_EOF
+# security-script.sh v${SCRIPT_VERSION}
+[Manager]
+DefaultUMask=${desired_umask}
+UMASK_EOF
+    if install_managed_file "$USER_UMASK_SYSTEMD_DROPIN" "$tsystemd_user" 644; then
+        changed=$((changed+1))
+    fi
+
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+
     if (( changed > 0 )); then
-        record_check "LOGIN_UMASK" "FIXED" "Interactive login umask set to ${desired_umask}"
+        record_check "LOGIN_UMASK" "FIXED" "System-wide default umask set to ${desired_umask}"
     else
-        record_check "LOGIN_UMASK" "PASS" "Interactive login umask already set to ${desired_umask}"
+        record_check "LOGIN_UMASK" "PASS" "System-wide default umask already set to ${desired_umask}"
     fi
     section_done "10a"
 }
