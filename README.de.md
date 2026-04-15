@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.5** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.6** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
 Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur nach, wenn Probleme gefunden werden.
 
@@ -14,7 +14,6 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - Erkennt Keyboard-Interactive/2FA `AuthenticationMethods` und deaktiviert keine erforderlichen Methoden
 - `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert
 - **SSH-Krypto-Richtlinienmodus** (`off` | `modern` | `fips-compatible` | `strict`) mit Validierung und Rollback bei Fehlschlag
-  - **Neu in v3.0.5:** `strict`-Modus für explizites Pinning von Ciphers/MACs/KEX
 
 ### Google 2FA (Zwei-Faktor-Authentifizierung)
 - Installiert und konfiguriert `libpam-google-authenticator`
@@ -51,8 +50,8 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - **Automatisches Audit** von `SystemMaxUse` gegen konfigurierten Zielwert (Standard: 1G)
 - Fragt nur nach, wenn der Wert von der Empfehlung abweicht
 
-### Login-Umask-Härtung *(erweitert in v3.0.5)*
-- **Systemweite Baseline-Härtung** via `/etc/login.defs`, `/etc/profile.d/` und **systemd Drop-ins** für System- und Benutzerdienste
+### Login-Umask-Härtung
+- **Systemweite Baseline-Härtung** via `/etc/login.defs`, `/etc/profile.d/` und systemd Drop-ins für System- und Benutzerdienste
 - Konfiguriert `umask 027` auf allen drei Ebenen für vollständige Abdeckung
 - Assessment validiert systemweite Umask-Abdeckung einschließlich systemd Drop-in-Präsenz
 - Rollback stellt alle Umask Drop-ins inklusive systemd-Ziele vollständig wieder her
@@ -120,6 +119,18 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - Optionaler Test-E-Mail-Versand
 - Sicherheitshinweis zur GPG/Secret-Tool-Passwortspeicherung
 
+### Compliance-Katalog & Berichterstattung *(neu in v3.0.6)*
+- **Stabile Check-IDs** und ein zentrales Schweregrad-Modell für jeden Härtungs-Check
+- **Skript-verwalteter Compliance-Katalog** mit CIS/BSI/STIG-Zuordnungsfeldern
+- Maschinenlesbarer Compliance-Bericht unter `/var/log/security-script/compliance_report.tsv`
+- **Exception-System** mit check-spezifischen Modi: `disable`, `warn`, `assessment-only`
+- Governance-Dateien-Menü zum Anzeigen und Bearbeiten von Katalog und Exception-Definitionen
+
+### Rollback-Aktionsbericht *(neu in v3.0.6)*
+- Detaillierter Bericht nach jedem Rollback-Lauf
+- Listet wiederhergestellte Elemente, Fehler, manuelle Prüfpunkte und erwartete ROTE Befunde auf
+- Geschrieben nach `/var/log/security-script/rollback_report.log`
+
 ### Backup & Wiederherstellung
 - Vor-Änderungs-Backups für jede geänderte Konfigurationsdatei
 - `list_backups`: Zeigt alle Backups mit Zeitstempeln
@@ -133,7 +144,7 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - Entfernt alle vom Skript hinzugefügten Dateien
 - Stellt entfernte Cron-Jobs wieder her
 - Läuft nicht-interaktiv und vollautomatisch
-- **Neu in v3.0.5:** Stellt SSH-Strict-Krypto-Richtlinie und systemweite Umask Drop-ins vollständig wieder her
+- Erstellt einen Rollback-Aktionsbericht mit wiederhergestellten Elementen und manuellen Prüfpunkten
 
 ### Selektive Entfernung
 - Interaktives Erkennungs- und Auswahlmenü für installierte Komponenten
@@ -142,7 +153,7 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 ### Log-Viewer
 - Eingebautes interaktives Log-Menü nach der Härtung zugänglich
 - Zeigt nach jedem Lauf eine Zusammenfassung aller relevanten Log-Speicherorte
-- Menüeinträge (0–10):
+- Menüeinträge (0–11):
 
 | # | Eintrag |
 |---|---------|
@@ -156,10 +167,11 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 | 8 | auditd-Rohlog |
 | 9 | Skript-Änderungslog |
 | 10 | Transaktionslog |
+| 11 | Compliance-Katalog & Exception-Definitionen |
 
 ### Dry-Run-Modus
 - Vorschau aller Änderungen ohne Systemmodifikation
-- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run`
+- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run`
 
 ---
 
@@ -196,8 +208,8 @@ Dies gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AI
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_5.sh
-sudo ./Linux-Server-Security-Script_v3_0_5.sh
+chmod +x Linux-Server-Security-Script_v3_0_6.sh
+sudo ./Linux-Server-Security-Script_v3_0_6.sh
 ```
 
 ### Startmenü
@@ -218,19 +230,19 @@ Beim Start wird einer von sieben Modi gewählt (verfügbar auf **Deutsch und Eng
 
 ```bash
 # Vorschau ohne Änderungen
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run
 
 # Nur Assessment (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --assess
 
 # Vollständiger Rollback
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --rollback
 
 # Selektive Entfernung
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --remove fail2ban,clamav
 
 # Verifizierung nach Härtung (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
 ```
 
 ### Voraussetzungen
@@ -267,6 +279,9 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 | Login-Umask-Härtung (systemweit) | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
 | SUID/SGID-Inventarisierung & Audit | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Login-Banner | ✅ Ja | ❌ Nein | ✅ Ja | ✅ Ja |
+| Compliance-Katalog (CIS/BSI/STIG) | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
+| Exception-System (check-spezifische Modi) | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
+| Rollback-Aktionsbericht | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Konfigurations-Backups & Wiederherstellung | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
 | Vollständiger Rollback + Transaktionslog | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Selektive Entfernung | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
@@ -277,22 +292,31 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 
 ---
 
-## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.5
+## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.6
 
-- **SSH-Krypto-Strict-Modus** — neuer `strict`-Richtlinienmodus für explizites Pinning von Ciphers/MACs/KEX; Assessment behandelt fehlendes Strict-Pinning als Befund; Rollback und selektive Entfernung stellen Strict-Krypto-Konfiguration vollständig wieder her
-- **Systemweite Umask-Härtung** — von interaktiv-only auf vollständige systemweite Baseline erweitert via `/etc/login.defs`, `/etc/profile.d/` und systemd Drop-ins (`/etc/systemd/system.conf.d/` + `/etc/systemd/user.conf.d/`); Assessment validiert alle drei Ebenen; Rollback stellt alle Umask Drop-ins vollständig wieder her
-- **Assessment erweitert** — validiert jetzt systemweite Umask-Abdeckung einschließlich systemd Drop-in-Präsenz und prüft auf explizites SSH-Strict-Krypto-Pinning
-- **Übernommen aus v3.0.4**: Baseline-Fixes im empfohlenen Modus, SUID/SGID-Inventarisierung, erweiterter auditd-Regelsatz, sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
+- **Stabile Check-IDs & Schweregrad-Modell** — jeder Härtungs-Check hat jetzt eine stabile ID und Schweregrad-Klassifizierung; ermöglicht konsistentes Tracking über Läufe und Umgebungen hinweg
+- **Compliance-Katalog** — skript-verwalteter Katalog mit CIS/BSI/STIG-Zuordnungsfeldern; maschinenlesbarer Compliance-Bericht unter `/var/log/security-script/compliance_report.tsv`
+- **Exception-System** — check-spezifische Exception-Modi (`disable`, `warn`, `assessment-only`) ermöglichen feingranulare Kontrolle ohne Skriptänderungen
+- **Governance-Dateien-Menü** — neue Log-Menü-Helfer (Option 11) zum Anzeigen und Bearbeiten von Compliance-Katalog und Exception-Definitionen direkt aus dem interaktiven Menü
+- **Rollback-Aktionsbericht** — detaillierter Post-Rollback-Bericht mit wiederhergestellten Elementen, Fehlern, manuellen Prüfpunkten und erwarteten ROTEN Befunden; unter `/var/log/security-script/rollback_report.log`
+- **Übernommen aus v3.0.5**: SSH-Strict-Krypto-Modus, systemweite Umask-Härtung via systemd Drop-ins, sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
 
 ---
 
 ## 📋 Changelog
 
+### v3.0.6
+- **NEU:** Stabile Check-IDs und zentrales Schweregrad-Modell für alle Härtungs-Checks
+- **NEU:** Skript-verwalteter Compliance-Katalog mit CIS/BSI/STIG-Zuordnungsfeldern und maschinenlesbarem TSV-Bericht
+- **NEU:** Exception-System mit check-spezifischen Modi: `disable`, `warn`, `assessment-only`
+- **NEU:** Governance-Dateien-Menü-Helfer (Log-Menü Option 11) zum Anzeigen/Bearbeiten von Katalog und Exception-Definitionen
+- **NEU:** Rollback-Aktionsbericht mit wiederhergestellten Elementen, Fehlern, manuellen Prüfpunkten und erwarteten ROTEN Befunden
+
 ### v3.0.5
 - **NEU:** `strict`-SSH-Krypto-Richtlinienmodus mit explizitem Ciphers/MACs/KEX-Pinning
-- **VERBESSERT:** Umask-Härtung von interaktiv-only auf vollständige systemweite Baseline erweitert (login.defs + Shell-Hook + systemd Drop-ins)
-- **VERBESSERT:** Assessment behandelt fehlendes SSH-Strict-Krypto-Pinning als Befund und validiert systemweite Umask-Abdeckung
-- **VERBESSERT:** Rollback und selektive Entfernung stellen SSH-Strict-Krypto-Richtlinie und systemweite Umask Drop-ins vollständig wieder her
+- **VERBESSERT:** Umask-Härtung auf vollständige systemweite Baseline erweitert (login.defs + Shell-Hook + systemd Drop-ins)
+- **VERBESSERT:** Assessment validiert systemweite Umask-Abdeckung und behandelt fehlendes SSH-Strict-Pinning als Befund
+- **VERBESSERT:** Rollback stellt SSH-Strict-Krypto-Richtlinie und alle systemd Umask Drop-ins vollständig wieder her
 
 ### v3.0.4
 - **VERBESSERT:** Empfohlener Modus bietet aktiv Baseline-Fixes für ROTE Befunde an (auditd, AIDE, Login-Umask, SUID/SGID-Baseline, SSH-Krypto-Richtlinie)
@@ -300,14 +324,7 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 - **NEU:** Login-Umask-Härtung via `/etc/login.defs` und `/etc/profile.d/`
 - **NEU:** SUID/SGID-Inventarisierungs-Baseline + tägliche Audit-only-Cron-Berichterstattung
 - **VERBESSERT:** auditd-Regelsatz mit STIG-Stil-Abdeckung erweitert
-- **BEHOBEN:** SUID/SGID-Inventarisierungs-Skriptgenerierung (TMP_FILE-Expansion-Bug; leeres Cron-Target-Skript)
-- **BEHOBEN:** SSH-Effektivkonfig-Fallback liest jetzt auch `sshd_config.d` Drop-ins, wenn `sshd -T` nicht nutzbar ist
-- **BEHOBEN:** Verhindert das Schreiben leerer SSH-Direktiven in das Härtungs-Drop-in
-- **BEHOBEN:** Sichere Fallback-Standardwerte für `ClientAliveInterval`, `ClientAliveCountMax` und `PrintLastLog`
-- **VERBESSERT:** SSH-Krypto-Prompt akzeptiert Enter/j/ja als empfohlenen Standard und n/nein als Ablehnung
-- **VERBESSERT:** Idempotenz-Nachweis plant nur noch für tatsächlich im Lauf ausgeführte Bereiche
-- **VERBESSERT:** Empfohlener Modus verwendet standardmäßig `modern` als SSH-Krypto-Richtlinie
-- **BEHOBEN:** Assessment-Logik gehärtet (Sudoers-TTY-Regex, auditd-Abhängigkeitsbehandlung, AppArmor-Aktivprozess-Erkennung)
+- **BEHOBEN:** Mehrere SSH-Konfigurations-, Assessment-Logik- und Idempotenz-Verbesserungen
 
 ---
 
