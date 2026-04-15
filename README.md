@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.4** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+**Version 3.0.5** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
 
 Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
 
@@ -13,7 +13,8 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Drop-in config via `/etc/ssh/sshd_config.d/` (modern, non-destructive)
 - Detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
 - `PermitRootLogin` normalized to `prohibit-password` in managed drop-ins
-- **SSH crypto policy mode** (`off` | `modern` | `fips-compatible`) with validation and rollback on failure
+- **SSH crypto policy mode** (`off` | `modern` | `fips-compatible` | `strict`) with validation and rollback on failure
+  - **New in v3.0.5:** `strict` mode for explicit Ciphers/MACs/KEX pinning
 
 ### Google 2FA (Two-Factor Authentication)
 - Installs and configures `libpam-google-authenticator`
@@ -50,12 +51,13 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - **Auto-audits** `SystemMaxUse` against configured target (default: 1G)
 - Only prompts if the value differs from the recommendation
 
-### Login Umask Hardening *(new in v3.0.4)*
-- Service-safe hardening for interactive users only
-- Configures `umask 027` in `/etc/login.defs` and `/etc/profile.d/`
-- Assessment checks login umask settings against baseline
+### Login Umask Hardening *(enhanced in v3.0.5)*
+- **System-wide baseline** hardening via `/etc/login.defs`, `/etc/profile.d/`, and **systemd drop-ins** for system and user services
+- Configures `umask 027` across all three layers for complete coverage
+- Assessment validates system-wide umask coverage including systemd drop-in presence
+- Rollback fully reverts all umask drop-ins including systemd targets
 
-### SUID/SGID Inventory & Auditing *(new in v3.0.4)*
+### SUID/SGID Inventory & Auditing
 - Creates a baseline of all SUID/SGID binaries on first run
 - Daily audit-only reporting via cron — no automatic removals
 - Writes inventory to `/var/lib/security-script/suid_sgid_baseline.txt`
@@ -131,6 +133,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Removes all files added by this script
 - Restores removed cron jobs
 - Runs non-interactively and fully automatically
+- **New in v3.0.5:** Fully reverts SSH strict crypto policy and system-wide umask drop-ins
 
 ### Selective Removal
 - Interactive detection + selection menu for installed components
@@ -156,7 +159,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 
 ### Dry-Run Mode
 - Preview all changes without modifying the system
-- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run`
+- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run`
 
 ---
 
@@ -193,8 +196,8 @@ This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, A
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_3.sh
-sudo ./Linux-Server-Security-Script_v3_0_3.sh
+chmod +x Linux-Server-Security-Script_v3_0_5.sh
+sudo ./Linux-Server-Security-Script_v3_0_5.sh
 ```
 
 ### Startup Menu
@@ -215,19 +218,19 @@ On launch, you choose one of seven modes (available in **German and English**):
 
 ```bash
 # Preview without changes
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run
 
 # Assessment only (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --assess
 
 # Full rollback
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --rollback
 
 # Selective removal
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --remove fail2ban,clamav
 
 # Verify after hardening (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 ```
 
 ### Requirements
@@ -245,7 +248,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 | Idempotent (safe for repeated runs) | ✅ Yes | 🔶 Partially | ✅ Yes | ✅ Yes |
 | Audit-first pattern | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | SSH hardening | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| SSH crypto policy | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
+| SSH crypto policy (incl. strict mode) | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
 | Google 2FA integration | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Sysctl hardening | ✅ Yes (`/etc/sysctl.d/`) | 🔶 Minimal | 🔶 Partially | ✅ Yes |
 | Sudoers TTY tickets | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
@@ -261,7 +264,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 | Filesystem hardening | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | Kernel module blacklist | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | Core dump restrictions | ✅ Yes | ❌ No | ✅ Yes | 🔶 Partially |
-| Login umask hardening | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
+| Login umask hardening (system-wide) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | SUID/SGID inventory & audit | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Login banners | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
 | Config backups & restore | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
@@ -274,19 +277,37 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.4
+## 🔒 Security & Quality Improvements in v3.0.5
 
-- **Recommended mode enhanced** — actively offers baseline fixes for real RED findings such as auditd, AIDE, login umask, SUID/SGID baseline, and SSH crypto policy
-- **SSH crypto policy** — new mode (`off` | `modern` | `fips-compatible`) with config validation and automatic rollback on failure; assessment differentiates between missing explicit policy and actually weak algorithms; recommended mode defaults to `modern`
-- **Login umask hardening** — service-safe hardening for interactive users only via `/etc/login.defs` and `/etc/profile.d/`; assessment checks equivalent shell hook locations
-- **SUID/SGID inventory** — baseline generation on first run; daily audit-only cron reporting; fixed TMP_FILE expansion bug and empty cron target script
-- **auditd ruleset expanded** — STIG-style coverage for session files, time change, permission changes, hostname changes, shell/profile hardening files, rsyslog, modprobe, and GRUB
-- **Assessment extended** — now checks SSH crypto policy, login umask, SUID/SGID baseline coverage, and extended auditd coverage
-- **Idempotence proof** — now only plans for sections actually executed in the run; skipped in step-by-step mode for sections the user chose to skip
-- **Assessment logic hardened** — sudoers TTY regex fixed, auditd dependency handling improved, AppArmor active-process awareness corrected
-- **SSH crypto prompt** — accepts Enter/y/yes as the recommended default and n/no as opt-out
-- **Container/workload safety** — all new additions are service-aware and avoid broad changes that could break Nextcloud, AdGuard Home, Caddy, Docker, or Podman workloads
-- **RETAINED from v3.0.3**: Safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
+- **SSH crypto strict mode** — new `strict` policy mode for explicit Ciphers/MACs/KEX pinning; assessment now treats missing strict pinning as a finding; rollback and selective remove fully revert strict crypto config
+- **System-wide umask hardening** — upgraded from interactive-only to a full system-wide baseline via `/etc/login.defs`, `/etc/profile.d/`, and systemd drop-ins (`/etc/systemd/system.conf.d/` + `/etc/systemd/user.conf.d/`); assessment validates all three layers; rollback fully reverts all umask drop-ins
+- **Assessment extended** — now validates system-wide umask coverage including systemd drop-in presence, and checks for strict SSH crypto pinning
+- **RETAINED from v3.0.4**: Recommended mode baseline fixes, SUID/SGID inventory, expanded auditd ruleset, safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
+
+---
+
+## 📋 Changelog
+
+### v3.0.5
+- **NEW:** `strict` SSH crypto policy mode with explicit Ciphers/MACs/KEX pinning
+- **IMPROVED:** Umask hardening upgraded from interactive-only to full system-wide baseline (login.defs + shell hook + systemd drop-ins)
+- **IMPROVED:** Assessment now treats missing strict SSH crypto pinning as a finding and validates system-wide umask coverage
+- **IMPROVED:** Rollback and selective remove fully revert SSH strict crypto policy and system-wide umask drop-ins
+
+### v3.0.4
+- **IMPROVED:** Recommended mode actively offers baseline fixes for RED findings (auditd, AIDE, login umask, SUID/SGID baseline, SSH crypto policy)
+- **NEW:** SSH crypto policy mode (`off` | `modern` | `fips-compatible`) with config validation and rollback
+- **NEW:** Login umask hardening via `/etc/login.defs` and `/etc/profile.d/`
+- **NEW:** SUID/SGID inventory baseline + daily audit-only cron reporting
+- **IMPROVED:** auditd ruleset expanded with STIG-style coverage
+- **FIXED:** SUID/SGID inventory script generation (TMP_FILE expansion bug; empty cron target script)
+- **FIXED:** SSH effective config fallback now reads `sshd_config.d` drop-ins when `sshd -T` is not usable
+- **FIXED:** Prevents writing empty SSH directive values into the hardening drop-in
+- **FIXED:** Safe fallback defaults for `ClientAliveInterval`, `ClientAliveCountMax`, and `PrintLastLog`
+- **IMPROVED:** SSH crypto prompt accepts Enter/y/yes as recommended default and n/no as opt-out
+- **IMPROVED:** Idempotence proof only plans for sections actually executed in the run
+- **IMPROVED:** Recommended mode defaults SSH crypto policy to `modern`
+- **FIXED:** Assessment logic hardened (sudoers TTY regex, auditd dependency handling, AppArmor active-process awareness)
 
 ---
 
