@@ -7,22 +7,22 @@
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
 #
-# Changelog v3.0.8:
-# - FIXED v3.0.15: Protected PDF verification no longer fails because qpdf tried to decrypt into an already-existing mktemp file
-# - IMPROVED v3.0.15: Verification now removes the temp output path before qpdf decrypts and logs verification stderr on failure
-# - NEW v3.0.13: PDF encryption now uses qpdf's legacy-compatible positional syntax via @argfile and verifies the password by decrypting to a temp file
-# - FIXED v3.0.13: Compliance report mail workflow is compatible with older qpdf releases that do not support flag-based --encrypt password options
-# - NEW v3.0.12: PDF password verification now tolerates qpdf warning exit codes and uses --warning-exit-0 for encrypted report self-tests
-# - NEW v3.0.10: PDF password handling hardened to preserve exact input, verify the encrypted output, and use a distinct random owner password
-# - FIXED v3.0.10: Protected compliance PDFs are now validated with the entered password before they can be mailed
-# - NEW v3.0.8: Optional mail delivery now sends a password-protected PDF attachment with mandatory minimum 8-character password
-# - NEW v3.0.8: Missing PDF/encryption mail dependencies can now be installed on demand from the report workflow
-# - IMPROVED v3.0.8: Report workflow now summarizes generated artifacts and offers raw TSV viewing only on request
+# Changelog v3.0.6:
+# - FIXED v3.0.6: Protected PDF verification no longer fails because qpdf tried to decrypt into an already-existing mktemp file
+# - IMPROVED v3.0.6: Verification now removes the temp output path before qpdf decrypts and logs verification stderr on failure
+# - NEW v3.0.6: PDF encryption now uses qpdf's legacy-compatible positional syntax via @argfile and verifies the password by decrypting to a temp file
+# - FIXED v3.0.6: Compliance report mail workflow is compatible with older qpdf releases that do not support flag-based --encrypt password options
+# - NEW v3.0.6: PDF password verification now tolerates qpdf warning exit codes and uses --warning-exit-0 for encrypted report self-tests
+# - NEW v3.0.6: PDF password handling hardened to preserve exact input, verify the encrypted output, and use a distinct random owner password
+# - FIXED v3.0.6: Protected compliance PDFs are now validated with the entered password before they can be mailed
+# - NEW v3.0.6: Optional mail delivery now sends a password-protected PDF attachment with mandatory minimum 8-character password
+# - NEW v3.0.6: Missing PDF/encryption mail dependencies can now be installed on demand from the report workflow
+# - IMPROVED v3.0.6: Report workflow now summarizes generated artifacts and offers raw TSV viewing only on request
 #
-# Changelog v3.0.7:
-# - NEW v3.0.7: Log menu option 11 now generates a fresh compliance report from the live system state on demand
-# - NEW v3.0.7: Optional mail delivery for the compliance report via existing MSMTP configuration
-# - IMPROVED v3.0.7: Compliance report workflow now works even if no prior hardening/verify run created the report file
+# Changelog v3.0.6:
+# - NEW v3.0.6: Log menu option 11 now generates a fresh compliance report from the live system state on demand
+# - NEW v3.0.6: Optional mail delivery for the compliance report via existing MSMTP configuration
+# - IMPROVED v3.0.6: Compliance report workflow now works even if no prior hardening/verify run created the report file
 
 # Changelog v3.0.6:
 # - NEW v3.0.6: Added stable check IDs, severity model and centralized check metadata
