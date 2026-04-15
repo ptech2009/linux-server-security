@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.5** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+**Version 3.0.6** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
 
 Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
 
@@ -14,7 +14,6 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
 - `PermitRootLogin` normalized to `prohibit-password` in managed drop-ins
 - **SSH crypto policy mode** (`off` | `modern` | `fips-compatible` | `strict`) with validation and rollback on failure
-  - **New in v3.0.5:** `strict` mode for explicit Ciphers/MACs/KEX pinning
 
 ### Google 2FA (Two-Factor Authentication)
 - Installs and configures `libpam-google-authenticator`
@@ -51,8 +50,8 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - **Auto-audits** `SystemMaxUse` against configured target (default: 1G)
 - Only prompts if the value differs from the recommendation
 
-### Login Umask Hardening *(enhanced in v3.0.5)*
-- **System-wide baseline** hardening via `/etc/login.defs`, `/etc/profile.d/`, and **systemd drop-ins** for system and user services
+### Login Umask Hardening
+- System-wide baseline hardening via `/etc/login.defs`, `/etc/profile.d/`, and systemd drop-ins for system and user services
 - Configures `umask 027` across all three layers for complete coverage
 - Assessment validates system-wide umask coverage including systemd drop-in presence
 - Rollback fully reverts all umask drop-ins including systemd targets
@@ -120,6 +119,18 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Optional test email sending
 - Security hint for GPG/secret-tool password storage
 
+### Compliance Catalog & Reporting *(new in v3.0.6)*
+- **Stable check IDs** and a centralized severity model for every hardening check
+- **Script-managed compliance catalog** with CIS/BSI/STIG mapping fields
+- Machine-readable compliance report written to `/var/log/security-script/compliance_report.tsv`
+- **Exception system** with per-check modes: `disable`, `warn`, `assessment-only`
+- Governance files menu helpers to view and edit the catalog and exception definitions
+
+### Rollback Action Report *(new in v3.0.6)*
+- Detailed report generated after every rollback run
+- Lists reverted items, failures, manual review points, and expected RED findings
+- Written to `/var/log/security-script/rollback_report.log`
+
 ### Backup & Restore
 - Pre-change backups for every modified config file
 - `list_backups`: Shows all backups with timestamps
@@ -133,7 +144,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - Removes all files added by this script
 - Restores removed cron jobs
 - Runs non-interactively and fully automatically
-- **New in v3.0.5:** Fully reverts SSH strict crypto policy and system-wide umask drop-ins
+- Generates a rollback action report with reverted items and manual review points
 
 ### Selective Removal
 - Interactive detection + selection menu for installed components
@@ -142,7 +153,7 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 ### Log Viewer
 - Built-in interactive log menu accessible after hardening
 - Shows a summary of all relevant log file locations after every run
-- Menu entries (0–10):
+- Menu entries (0–11):
 
 | # | Entry |
 |---|-------|
@@ -156,10 +167,11 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 | 8 | auditd raw log |
 | 9 | Script change log |
 | 10 | Transaction log |
+| 11 | Compliance catalog & exception definitions |
 
 ### Dry-Run Mode
 - Preview all changes without modifying the system
-- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run`
+- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run`
 
 ---
 
@@ -196,8 +208,8 @@ This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, A
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_5.sh
-sudo ./Linux-Server-Security-Script_v3_0_5.sh
+chmod +x Linux-Server-Security-Script_v3_0_6.sh
+sudo ./Linux-Server-Security-Script_v3_0_6.sh
 ```
 
 ### Startup Menu
@@ -218,19 +230,19 @@ On launch, you choose one of seven modes (available in **German and English**):
 
 ```bash
 # Preview without changes
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run
 
 # Assessment only (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --assess
 
 # Full rollback
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --rollback
 
 # Selective removal
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --remove fail2ban,clamav
 
 # Verify after hardening (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
 ```
 
 ### Requirements
@@ -267,6 +279,9 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 | Login umask hardening (system-wide) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
 | SUID/SGID inventory & audit | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Login banners | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
+| Compliance catalog (CIS/BSI/STIG) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
+| Exception system (per-check modes) | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| Rollback action report | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Config backups & restore | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
 | Full rollback + transaction log | ✅ Yes | ❌ No | ❌ No | ❌ No |
 | Selective removal | ✅ Yes | ❌ No | ❌ No | ❌ No |
@@ -277,22 +292,31 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.5
+## 🔒 Security & Quality Improvements in v3.0.6
 
-- **SSH crypto strict mode** — new `strict` policy mode for explicit Ciphers/MACs/KEX pinning; assessment now treats missing strict pinning as a finding; rollback and selective remove fully revert strict crypto config
-- **System-wide umask hardening** — upgraded from interactive-only to a full system-wide baseline via `/etc/login.defs`, `/etc/profile.d/`, and systemd drop-ins (`/etc/systemd/system.conf.d/` + `/etc/systemd/user.conf.d/`); assessment validates all three layers; rollback fully reverts all umask drop-ins
-- **Assessment extended** — now validates system-wide umask coverage including systemd drop-in presence, and checks for strict SSH crypto pinning
-- **RETAINED from v3.0.4**: Recommended mode baseline fixes, SUID/SGID inventory, expanded auditd ruleset, safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
+- **Stable check IDs & severity model** — every hardening check now has a stable ID and severity classification; enables consistent tracking across runs and environments
+- **Compliance catalog** — script-managed catalog with CIS/BSI/STIG mapping fields; machine-readable compliance report written to `/var/log/security-script/compliance_report.tsv`
+- **Exception system** — per-check exception modes (`disable`, `warn`, `assessment-only`) allow fine-grained control without modifying the script itself
+- **Governance files menu** — new log menu helpers (option 11) to view and edit the compliance catalog and exception definitions directly from the interactive menu
+- **Rollback action report** — detailed post-rollback report listing reverted items, failures, manual review points, and expected RED findings; written to `/var/log/security-script/rollback_report.log`
+- **RETAINED from v3.0.5**: SSH strict crypto mode, system-wide umask hardening via systemd drop-ins, safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
 
 ---
 
 ## 📋 Changelog
 
+### v3.0.6
+- **NEW:** Stable check IDs and centralized severity model for all hardening checks
+- **NEW:** Script-managed compliance catalog with CIS/BSI/STIG mapping fields and machine-readable TSV report
+- **NEW:** Exception system with per-check modes: `disable`, `warn`, `assessment-only`
+- **NEW:** Governance files menu helpers (log menu option 11) to view/edit catalog and exception definitions
+- **NEW:** Rollback action report with reverted items, failures, manual review points, and expected RED findings
+
 ### v3.0.5
 - **NEW:** `strict` SSH crypto policy mode with explicit Ciphers/MACs/KEX pinning
-- **IMPROVED:** Umask hardening upgraded from interactive-only to full system-wide baseline (login.defs + shell hook + systemd drop-ins)
-- **IMPROVED:** Assessment now treats missing strict SSH crypto pinning as a finding and validates system-wide umask coverage
-- **IMPROVED:** Rollback and selective remove fully revert SSH strict crypto policy and system-wide umask drop-ins
+- **IMPROVED:** Umask hardening upgraded to full system-wide baseline (login.defs + shell hook + systemd drop-ins)
+- **IMPROVED:** Assessment validates system-wide umask coverage and treats missing strict SSH crypto pinning as a finding
+- **IMPROVED:** Rollback fully reverts SSH strict crypto policy and all systemd umask drop-ins
 
 ### v3.0.4
 - **IMPROVED:** Recommended mode actively offers baseline fixes for RED findings (auditd, AIDE, login umask, SUID/SGID baseline, SSH crypto policy)
@@ -300,14 +324,7 @@ sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 - **NEW:** Login umask hardening via `/etc/login.defs` and `/etc/profile.d/`
 - **NEW:** SUID/SGID inventory baseline + daily audit-only cron reporting
 - **IMPROVED:** auditd ruleset expanded with STIG-style coverage
-- **FIXED:** SUID/SGID inventory script generation (TMP_FILE expansion bug; empty cron target script)
-- **FIXED:** SSH effective config fallback now reads `sshd_config.d` drop-ins when `sshd -T` is not usable
-- **FIXED:** Prevents writing empty SSH directive values into the hardening drop-in
-- **FIXED:** Safe fallback defaults for `ClientAliveInterval`, `ClientAliveCountMax`, and `PrintLastLog`
-- **IMPROVED:** SSH crypto prompt accepts Enter/y/yes as recommended default and n/no as opt-out
-- **IMPROVED:** Idempotence proof only plans for sections actually executed in the run
-- **IMPROVED:** Recommended mode defaults SSH crypto policy to `modern`
-- **FIXED:** Assessment logic hardened (sudoers TTY regex, auditd dependency handling, AppArmor active-process awareness)
+- **FIXED:** Multiple SSH config, assessment logic, and idempotence improvements
 
 ---
 
