@@ -2,10 +2,34 @@
 
 # ============================================================================
 # Linux Server Security Script
-# Version: 3.0.5
+# Version: 3.0.6
 # Author: Paul Schumacher
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
+#
+# Changelog v3.0.8:
+# - FIXED v3.0.15: Protected PDF verification no longer fails because qpdf tried to decrypt into an already-existing mktemp file
+# - IMPROVED v3.0.15: Verification now removes the temp output path before qpdf decrypts and logs verification stderr on failure
+# - NEW v3.0.13: PDF encryption now uses qpdf's legacy-compatible positional syntax via @argfile and verifies the password by decrypting to a temp file
+# - FIXED v3.0.13: Compliance report mail workflow is compatible with older qpdf releases that do not support flag-based --encrypt password options
+# - NEW v3.0.12: PDF password verification now tolerates qpdf warning exit codes and uses --warning-exit-0 for encrypted report self-tests
+# - NEW v3.0.10: PDF password handling hardened to preserve exact input, verify the encrypted output, and use a distinct random owner password
+# - FIXED v3.0.10: Protected compliance PDFs are now validated with the entered password before they can be mailed
+# - NEW v3.0.8: Optional mail delivery now sends a password-protected PDF attachment with mandatory minimum 8-character password
+# - NEW v3.0.8: Missing PDF/encryption mail dependencies can now be installed on demand from the report workflow
+# - IMPROVED v3.0.8: Report workflow now summarizes generated artifacts and offers raw TSV viewing only on request
+#
+# Changelog v3.0.7:
+# - NEW v3.0.7: Log menu option 11 now generates a fresh compliance report from the live system state on demand
+# - NEW v3.0.7: Optional mail delivery for the compliance report via existing MSMTP configuration
+# - IMPROVED v3.0.7: Compliance report workflow now works even if no prior hardening/verify run created the report file
+
+# Changelog v3.0.6:
+# - NEW v3.0.6: Added stable check IDs, severity model and centralized check metadata
+# - NEW v3.0.6: Added script-managed compliance catalog + compliance report (CIS/BSI/STIG mapping fields)
+# - NEW v3.0.6: Added exception system with per-check modes: disable, warn, assessment-only
+# - NEW v3.0.6: Added governance files menu helpers to view/edit the catalog and exception definitions
+# - NEW v3.0.6: Added rollback action report with reverted items, failures, manual review points and expected RED findings
 #
 # Changelog v3.0.5:
 # - NEW v3.0.5: Added strict SSH crypto policy mode (strict) for explicit Ciphers/MACs/KEX pinning
@@ -47,7 +71,7 @@ set -uo pipefail
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-readonly SCRIPT_VERSION="3.0.5"
+readonly SCRIPT_VERSION="3.0.6"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
@@ -83,6 +107,11 @@ readonly IDEMPOTENCE_LOG="/var/log/security_script_idempotence.log"
 readonly BASELINE_SNAPSHOT="/var/log/security_script_baseline_before_hardening.tsv"
 readonly ROLLBACK_VALIDATION_REPORT="/var/log/security_script_rollback_validation.log"
 readonly DEFAULT_AUTO_CONFIG="./security_config.env"
+readonly GOVERNANCE_REPORT_DIR="/var/log/security-script"
+readonly COMPLIANCE_REPORT="${GOVERNANCE_REPORT_DIR}/compliance_report.tsv"
+readonly COMPLIANCE_REPORT_PDF="${GOVERNANCE_REPORT_DIR}/compliance_report.pdf"
+readonly COMPLIANCE_REPORT_PDF_PROTECTED="${GOVERNANCE_REPORT_DIR}/compliance_report_protected.pdf"
+readonly ROLLBACK_ACTION_REPORT="${GOVERNANCE_REPORT_DIR}/rollback_report.log"
 
 # ============================================================================
 # GLOBAL STATE
@@ -148,6 +177,55 @@ mktemp_tracked() { local f; f=$(mktemp); TMPFILES+=("$f"); echo "$f"; }
 declare -A ASSESS_RESULTS=()
 declare -a ASSESS_ORDER=()
 
+declare -A CHECK_STABLE_ID=()
+declare -A CHECK_SEVERITY=()
+declare -A CHECK_TITLE=()
+declare -A CHECK_SECTION=()
+declare -A CHECK_CIS=()
+declare -A CHECK_BSI=()
+declare -A CHECK_STIG=()
+declare -A CHECK_NOTES=()
+declare -A CHECK_LEGACY_BY_STABLE_ID=()
+
+declare -A ASSESS_META_STABLE_ID=()
+declare -A ASSESS_META_SEVERITY=()
+declare -A ASSESS_META_TITLE=()
+declare -A ASSESS_META_MODE=()
+declare -A ASSESS_META_REASON=()
+
+declare -A EXCEPTION_MODE_BY_ID=()
+declare -A EXCEPTION_REASON_BY_ID=()
+
+declare -a ROLLBACK_ITEMS_REVERTED=()
+declare -a ROLLBACK_ITEMS_FAILED=()
+declare -a ROLLBACK_ITEMS_MANUAL=()
+declare -a ROLLBACK_ITEMS_EXPECT_RED=()
+
+# ============================================================================
+# EMBEDDED USER EXCEPTION BLOCK
+# Edit this block directly inside the script when a check must be excepted.
+# Supported modes: disable | warn | assessment-only
+#
+# Examples:
+#   ["NET-001"]="assessment-only"
+#   ["SSH-008"]="warn"
+#
+# Typical use case:
+#   ["NET-001"]="assessment-only"
+#   ["NET-001"]="disable"
+#   ["UMASK-001"]="warn"
+# and set the matching reason below.
+# ============================================================================
+declare -A EMBEDDED_EXCEPTION_MODE=(
+    # ["NET-001"]="assessment-only"
+    # ["SSH-008"]="warn"
+)
+
+declare -A EMBEDDED_EXCEPTION_REASON=(
+    # ["NET-001"]="handled externally by upstream firewall"
+    # ["SSH-008"]="legacy monitoring appliance requires older SSH client compatibility"
+)
+
 # ============================================================================
 # COLORS
 # ============================================================================
@@ -178,7 +256,403 @@ record_dry_run_action() {
 }
 dry_run_echo() { record_dry_run_action "$1"; echo -e "${C_MAGENTA}DRY-RUN:${C_RESET} Would execute: $1"; }
 section_done() { echo "--- Section $1 completed ---"; echo; }
+
 mark_section_executed() { SECTION_WAS_EXECUTED=true; }
+
+# ============================================================================
+# CHECK GOVERNANCE / COMPLIANCE / EXCEPTIONS
+# ============================================================================
+LAST_SECTION_SKIP_REASON=""
+LAST_SECTION_SKIP_MODE=""
+
+register_check_meta() {
+    local legacy_id="$1" stable_id="$2" severity="$3" title="$4" section="$5" cis="$6" bsi="$7" stig="$8" notes="${9:-}"
+    CHECK_STABLE_ID["$legacy_id"]="$stable_id"
+    CHECK_SEVERITY["$legacy_id"]="$severity"
+    CHECK_TITLE["$legacy_id"]="$title"
+    CHECK_SECTION["$legacy_id"]="$section"
+    CHECK_CIS["$legacy_id"]="$cis"
+    CHECK_BSI["$legacy_id"]="$bsi"
+    CHECK_STIG["$legacy_id"]="$stig"
+    CHECK_NOTES["$legacy_id"]="$notes"
+    CHECK_LEGACY_BY_STABLE_ID["$stable_id"]="$legacy_id"
+}
+
+init_check_catalog_metadata() {
+    (( ${#CHECK_STABLE_ID[@]} > 0 )) && return 0
+
+    register_check_meta "SSH_KEY_GEN"           "SSH-010"     "medium"   "Administrative Ed25519 SSH key available"                    "ssh"         "CIS: Secure administrative access / SSH authentication"          "BSI: SYS.1.3 SSH administration"                         "STIG: OpenSSH administrative authentication"                 "Operational safeguard for hardened SSH environments"
+    register_check_meta "SSH_HARDENING"         "SSH-900"     "info"     "Managed SSH baseline drop-in state"                           "ssh"         "CIS: SSH server baseline management"                           "BSI: SYS.1.3 SSH configuration management"                "STIG: OpenSSH configuration management"                      "Synthetic orchestration check for managed baseline state"
+    register_check_meta "SSH_ROOT_LOGIN"        "SSH-001"     "high"     "Disable direct root SSH login"                                "ssh"         "CIS: SSH server root login restrictions"                      "BSI: SYS.1.3 Secure remote administration"                "STIG: OpenSSH prohibit direct root login"                   ""
+    register_check_meta "SSH_PASSWORD_AUTH"     "SSH-002"     "critical" "Disable SSH password authentication"                          "ssh"         "CIS: SSH password authentication disabled"                    "BSI: SYS.1.3 Strong authentication for admin access"      "STIG: OpenSSH disallow password authentication"             ""
+    register_check_meta "SSH_X11"               "SSH-003"     "medium"   "Disable SSH X11 forwarding"                                   "ssh"         "CIS: Limit SSH forwarding features"                           "BSI: SYS.1.3 Minimize exposed SSH features"                "STIG: OpenSSH disable X11 forwarding"                       ""
+    register_check_meta "SSH_AGENT_FWD"         "SSH-004"     "medium"   "Disable SSH agent forwarding"                                 "ssh"         "CIS: Limit SSH forwarding features"                           "BSI: SYS.1.3 Protect administrative credentials"           "STIG: OpenSSH disable agent forwarding"                     ""
+    register_check_meta "SSH_TCP_FWD"           "SSH-005"     "medium"   "Disable SSH TCP forwarding when not required"                 "ssh"         "CIS: Limit SSH forwarding features"                           "BSI: SYS.1.3 Reduce SSH attack surface"                    "STIG: OpenSSH disable TCP forwarding"                       ""
+    register_check_meta "SSH_GRACE_TIME"        "SSH-006"     "medium"   "Restrict SSH login grace time"                                "ssh"         "CIS: SSH session hardening"                                    "BSI: SYS.1.3 Protect remote access sessions"               "STIG: OpenSSH login grace time configuration"               ""
+    register_check_meta "SSH_MAX_AUTH"          "SSH-007"     "medium"   "Restrict SSH authentication retries"                          "ssh"         "CIS: SSH authentication retry limits"                         "BSI: SYS.1.3 Resist brute-force on remote admin"           "STIG: OpenSSH MaxAuthTries configuration"                   ""
+    register_check_meta "SSH_CRYPTO_POLICY"     "SSH-008"     "high"     "Pin approved SSH crypto policy"                               "ssh"         "CIS: SSH cryptographic policy / approved algorithms"          "BSI: SYS.1.3 Approved cryptography for SSH"                "STIG: OpenSSH approved ciphers MACs and KEX"                ""
+    register_check_meta "SSH_GOOGLE_2FA"        "SSH-009"     "medium"   "Enable second factor for SSH administration"                  "ssh"         "CIS: MFA for privileged remote administration"                "BSI: ORP Identity and access management / MFA"             "STIG: Multifactor administrative remote access"             ""
+    register_check_meta "UNATTENDED_UPGRADES"   "PATCH-001"   "high"     "Apply security updates automatically"                         "patching"    "CIS: Automated patching / security updates"                   "BSI: OPS Patch and change management"                      "STIG: Timely installation of security patches"              ""
+    register_check_meta "UFW_ACTIVE"            "NET-001"     "high"     "Host firewall active"                                         "network"     "CIS: Host-based firewall enabled"                             "BSI: NET Network filtering on hosts"                       "STIG: Host firewall enabled and managed"                     ""
+    register_check_meta "FAIL2BAN"              "NET-002"     "medium"   "Brute-force protection active"                                "network"     "CIS: Protect exposed services from brute-force"               "BSI: Detection and response for repeated login failures"   "STIG: Automated response to repeated failed logons"         ""
+    register_check_meta "CLAMAV"                "MAL-001"     "medium"   "Malware scanning capability present"                          "malware"     "CIS: Anti-malware on relevant workloads"                      "BSI: Malware protection for file and mail flows"           "STIG: Anti-malware capability on applicable systems"        ""
+    register_check_meta "AUDITD"                "AUDITD-001"  "high"     "Auditd installed and active"                                  "auditd"      "CIS: Audit logging enabled"                                   "BSI: Logging and evidence generation"                      "STIG: auditd service enabled and running"                   ""
+    register_check_meta "AUDITD_EXTENDED"       "AUDITD-002"  "medium"   "Extended audit coverage present"                              "auditd"      "CIS: Extended audit rules for key security events"            "BSI: Logging of security-relevant administrative actions"  "STIG: Additional audit rules for privileged changes"        ""
+    register_check_meta "AIDE"                  "FIM-001"     "medium"   "File integrity monitoring baseline available"                 "aide"        "CIS: File integrity monitoring"                               "BSI: Integrity protection and verification"                "STIG: File integrity monitoring mechanism configured"       ""
+    register_check_meta "APPARMOR"              "MAC-001"     "medium"   "Mandatory access control active"                              "apparmor"    "CIS: Mandatory Access Control framework enabled"              "BSI: Application isolation and least privilege"            "STIG: Mandatory access control active"                      ""
+    register_check_meta "SYSCTL"                "KERNEL-001"  "high"     "Kernel and network sysctl baseline applied"                   "sysctl"      "CIS: Kernel and network parameter hardening"                  "BSI: System hardening of kernel and network stack"         "STIG: Kernel runtime parameter hardening"                   ""
+    register_check_meta "CORE_DUMPS"            "KERNEL-002"  "medium"   "Core dumps disabled for production baseline"                  "sysctl"      "CIS: Restrict information disclosure via core dumps"          "BSI: Minimize sensitive forensic residue"                  "STIG: Disable unrestricted core dumps"                      ""
+    register_check_meta "FSTAB_HARDENING"       "FS-001"      "medium"   "Secure mount options on temporary filesystems"                "filesystem"  "CIS: noexec nosuid nodev on temporary mounts"                 "BSI: Harden temporary and shared storage areas"            "STIG: Secure mount options on temporary storage"            ""
+    register_check_meta "MODULE_BLACKLIST"      "KERNEL-003"  "medium"   "Unused kernel modules blacklisted"                            "modules"     "CIS: Reduce kernel attack surface"                            "BSI: Disable unnecessary system functionality"             "STIG: Blacklist unnecessary kernel modules"                 ""
+    register_check_meta "PAM_PWQUALITY"         "PAM-001"     "high"     "Password quality policy configured"                           "pam"         "CIS: Password complexity and minimum length"                  "BSI: Password policy enforcement"                          "STIG: Password quality requirements enforced"               ""
+    register_check_meta "PAM_FAILLOCK"          "PAM-002"     "high"     "Account lockout on repeated failures configured"              "pam"         "CIS: Account lockout / failed authentication throttling"      "BSI: Protection against guessing attacks"                  "STIG: Consecutive failed logon lockout"                     ""
+    register_check_meta "ROOT_LOCKED"           "ACC-001"     "medium"   "Local root account locked for direct login"                   "pam"         "CIS: Secure privileged account handling"                      "BSI: Controlled use of privileged accounts"                "STIG: Restrict direct privileged account logon"             ""
+    register_check_meta "LOGIN_BANNER"          "BANNER-001"  "low"       "Authorized-use banner configured"                             "banner"      "CIS: Warning banners"                                         "BSI: Legal and compliance login notice"                    "STIG: Display approved login banner"                        ""
+    register_check_meta "SUDOERS_TTY"           "SUDO-001"    "medium"   "tty_tickets configured for sudo sessions"                     "sudoers"     "CIS: Secure sudo behavior"                                    "BSI: Separation of privileged sessions"                    "STIG: Privileged session reauthentication behavior"         ""
+    register_check_meta "LOGIN_UMASK"           "UMASK-001"   "high"     "Restrictive default system umask configured"                  "umask"       "CIS: Default permissions / umask baseline"                    "BSI: Secure default file permissions"                      "STIG: Default creation permissions hardened"                ""
+    register_check_meta "SUID_SGID_BASELINE"    "FS-002"      "medium"   "SUID/SGID baseline inventory present"                         "filesystem"  "CIS: Monitor privileged executables"                          "BSI: Detect unauthorized privilege surfaces"               "STIG: Inventory and review privileged executables"          ""
+    register_check_meta "NTP"                   "TIME-001"    "medium"   "Reliable time synchronization active"                         "time"        "CIS: Time synchronization"                                    "BSI: Reliable system time"                                 "STIG: Authoritative time source configured"                 ""
+}
+
+resolve_current_script_path() {
+    local src_path="${BASH_SOURCE[0]}"
+    if [[ "$src_path" != /* ]]; then
+        src_path="$(cd "$(dirname "$src_path")" && pwd -P)/$(basename "$src_path")"
+    fi
+    printf '%s
+' "$src_path"
+}
+
+ensure_governance_directories() {
+    mkdir -p "$GOVERNANCE_REPORT_DIR" 2>/dev/null || true
+}
+
+load_embedded_exception_definitions() {
+    EXCEPTION_MODE_BY_ID=()
+    EXCEPTION_REASON_BY_ID=()
+
+    local stable mode reason legacy
+    for stable in "${!EMBEDDED_EXCEPTION_MODE[@]}"; do
+        mode="${EMBEDDED_EXCEPTION_MODE[$stable],,}"
+        legacy="${CHECK_LEGACY_BY_STABLE_ID[$stable]:-}"
+        if [[ -z "$legacy" ]]; then
+            warn "Ignoring embedded exception mode for unknown check ID: $stable"
+            continue
+        fi
+        case "$mode" in
+            disable|warn|assessment-only) EXCEPTION_MODE_BY_ID["$stable"]="$mode" ;;
+            *) warn "Ignoring unsupported embedded exception mode for $stable: ${EMBEDDED_EXCEPTION_MODE[$stable]}" ;;
+        esac
+    done
+
+    for stable in "${!EMBEDDED_EXCEPTION_REASON[@]}"; do
+        reason="${EMBEDDED_EXCEPTION_REASON[$stable]}"
+        legacy="${CHECK_LEGACY_BY_STABLE_ID[$stable]:-}"
+        if [[ -z "$legacy" ]]; then
+            warn "Ignoring embedded exception reason for unknown check ID: $stable"
+            continue
+        fi
+        EXCEPTION_REASON_BY_ID["$stable"]="$reason"
+    done
+}
+
+ensure_governance_files() {
+    ensure_governance_directories
+}
+
+reload_governance_state() {
+    init_check_catalog_metadata
+    load_embedded_exception_definitions
+}
+
+emit_embedded_check_catalog() {
+    local legacy stable severity title section cis bsi stig notes
+    printf '# embedded check catalog from this script (v%s)
+' "$SCRIPT_VERSION"
+    printf '# stable_id	legacy_key	severity	title	section	cis_controls	bsi_controls	stig_controls	notes
+'
+    for legacy in $(printf '%s
+' "${!CHECK_STABLE_ID[@]}" | sort); do
+        stable="${CHECK_STABLE_ID[$legacy]}"
+        severity="${CHECK_SEVERITY[$legacy]}"
+        title="${CHECK_TITLE[$legacy]}"
+        section="${CHECK_SECTION[$legacy]}"
+        cis="${CHECK_CIS[$legacy]}"
+        bsi="${CHECK_BSI[$legacy]}"
+        stig="${CHECK_STIG[$legacy]}"
+        notes="${CHECK_NOTES[$legacy]}"
+        printf '%s	%s	%s	%s	%s	%s	%s	%s	%s
+'             "$stable" "$legacy" "$severity" "$title" "$section" "$cis" "$bsi" "$stig" "$notes"
+    done
+}
+
+emit_embedded_exceptions_view() {
+    local stable mode reason legacy
+    printf '# embedded exceptions from this script
+'
+    printf '# edit the EMBEDDED_EXCEPTION_MODE / EMBEDDED_EXCEPTION_REASON blocks inside the script
+'
+    printf '# stable_id	mode	reason	legacy_key	title
+'
+    for stable in $(printf '%s
+' "${!CHECK_LEGACY_BY_STABLE_ID[@]}" | sort); do
+        mode="${EMBEDDED_EXCEPTION_MODE[$stable]:-}"
+        reason="${EMBEDDED_EXCEPTION_REASON[$stable]:-}"
+        [[ -n "$mode" || -n "$reason" ]] || continue
+        legacy="${CHECK_LEGACY_BY_STABLE_ID[$stable]}"
+        printf '%s	%s	%s	%s	%s
+'             "$stable" "${mode:-<unset>}" "${reason:-<unset>}" "$legacy" "$(lookup_check_title "$legacy")"
+    done
+}
+
+show_generated_text() {
+    local title="$1" generator_func="$2" tmp
+    tmp=$(mktemp_tracked)
+    "$generator_func" > "$tmp"
+    show_text_file "$title" "$tmp"
+}
+
+open_embedded_script_editor() {
+    local title="$1" focus_hint="$2" jump_to_hint="${3:-false}" editor script_path editor_base focus_line="" launch_ok=false
+    echo
+    echo -e "${C_BOLD}${title}${C_RESET}"
+    script_path="$(resolve_current_script_path)"
+    echo "Path: $script_path"
+    if [[ -n "$focus_hint" ]]; then
+        echo "Hint: search for $focus_hint"
+        focus_line=$(grep -n -m1 -F "$focus_hint" "$script_path" 2>/dev/null | cut -d: -f1 || true)
+        if [[ -n "$focus_line" && "$jump_to_hint" == "true" ]]; then
+            if [[ "$UI_LANG" == "de" ]]; then
+                echo "Springe möglichst direkt zu Zeile: $focus_line"
+            else
+                echo "Will try to jump directly to line: $focus_line"
+            fi
+        fi
+    fi
+    editor="$(preferred_editor 2>/dev/null || true)"
+    if [[ -z "$editor" ]]; then
+        warn "No editor found (EDITOR/nano/vim/vi)."
+        read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
+        return 1
+    fi
+    if [[ ! -w "$script_path" ]]; then
+        warn "Script file is not writable: $script_path"
+        read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
+        return 1
+    fi
+
+    editor_base="$(basename -- "$editor")"
+    if [[ "$jump_to_hint" == "true" && -n "$focus_line" ]]; then
+        case "$editor_base" in
+            nano|pico)
+                "$editor" "+${focus_line}" "$script_path" && launch_ok=true
+                ;;
+            vim|vi|nvim|view|vim.basic)
+                "$editor" "+${focus_line}" "$script_path" && launch_ok=true
+                ;;
+            less)
+                "$editor" "+${focus_line}g" "$script_path" && launch_ok=true
+                ;;
+        esac
+    fi
+    if ! $launch_ok; then
+        "$editor" "$script_path"
+    fi
+    reload_governance_state
+    return 0
+}
+
+lookup_check_stable_id() {
+    local legacy_id="$1"
+    printf '%s\n' "${CHECK_STABLE_ID[$legacy_id]:-$legacy_id}"
+}
+
+lookup_check_severity() {
+    local legacy_id="$1"
+    printf '%s\n' "${CHECK_SEVERITY[$legacy_id]:-medium}"
+}
+
+lookup_check_title() {
+    local legacy_id="$1"
+    if [[ -n "${CHECK_TITLE[$legacy_id]:-}" ]]; then
+        printf '%s\n' "${CHECK_TITLE[$legacy_id]}"
+    else
+        printf '%s\n' "$legacy_id"
+    fi
+}
+
+lookup_check_controls_compact() {
+    local legacy_id="$1"
+    printf 'CIS=%s | BSI=%s | STIG=%s\n' \
+        "${CHECK_CIS[$legacy_id]:-n/a}" \
+        "${CHECK_BSI[$legacy_id]:-n/a}" \
+        "${CHECK_STIG[$legacy_id]:-n/a}"
+}
+
+get_section_related_checks() {
+    case "$1" in
+        ssh_key|configure_ssh_key_and_users) echo "SSH_KEY_GEN" ;;
+        unattended_upgrades|configure_unattended_upgrades) echo "UNATTENDED_UPGRADES" ;;
+        ssh|ssh_hardening|ssh_baseline|configure_ssh_hardening) echo "SSH_HARDENING SSH_ROOT_LOGIN SSH_PASSWORD_AUTH SSH_X11 SSH_AGENT_FWD SSH_TCP_FWD SSH_GRACE_TIME SSH_MAX_AUTH SSH_CRYPTO_POLICY" ;;
+        ssh_crypto) echo "SSH_CRYPTO_POLICY" ;;
+        ssh_google_2fa|google_2fa|ssh_2fa|configure_google_2fa) echo "SSH_GOOGLE_2FA" ;;
+        ufw|configure_ufw) echo "UFW_ACTIVE" ;;
+        fail2ban|configure_fail2ban) echo "FAIL2BAN" ;;
+        clamav|configure_clamav) echo "CLAMAV" ;;
+        auditd|audit|configure_auditd) echo "AUDITD AUDITD_EXTENDED" ;;
+        aide|configure_aide) echo "AIDE" ;;
+        apparmor|configure_apparmor_enforce) echo "APPARMOR" ;;
+        sysctl|configure_sysctl) echo "SYSCTL CORE_DUMPS" ;;
+        journald|configure_journald) echo "" ;;
+        filesystem|configure_filesystem_hardening) echo "FSTAB_HARDENING" ;;
+        modules|module_blacklist|configure_module_blacklist) echo "MODULE_BLACKLIST" ;;
+        pam|pam_hardening|configure_pam_hardening) echo "PAM_PWQUALITY PAM_FAILLOCK ROOT_LOCKED" ;;
+        banner|banners|configure_login_banners) echo "LOGIN_BANNER" ;;
+        sudoers|sudoers_tty|configure_sudoers_tty) echo "SUDOERS_TTY" ;;
+        login_umask|umask|system_umask|configure_login_umask) echo "LOGIN_UMASK" ;;
+        suid_sgid|suidsgid|configure_suid_sgid_inventory) echo "SUID_SGID_BASELINE" ;;
+        ntp) echo "NTP" ;;
+        *) echo "" ;;
+    esac
+}
+
+get_exception_mode_for_legacy_check() {
+    local legacy_id="$1" stable_id
+    stable_id="$(lookup_check_stable_id "$legacy_id")"
+    printf '%s\n' "${EXCEPTION_MODE_BY_ID[$stable_id]:-}"
+}
+
+get_exception_reason_for_legacy_check() {
+    local legacy_id="$1" stable_id
+    stable_id="$(lookup_check_stable_id "$legacy_id")"
+    printf '%s\n' "${EXCEPTION_REASON_BY_ID[$stable_id]:-}"
+}
+
+section_skip_record_desc() {
+    if [[ -n "${LAST_SECTION_SKIP_REASON:-}" ]]; then
+        printf 'Skipped via exception (%s: %s)\n' "${LAST_SECTION_SKIP_MODE:-unknown}" "${LAST_SECTION_SKIP_REASON}"
+    else
+        printf 'Skipped via config\n'
+    fi
+}
+
+rollback_report_reset() {
+    ROLLBACK_ITEMS_REVERTED=()
+    ROLLBACK_ITEMS_FAILED=()
+    ROLLBACK_ITEMS_MANUAL=()
+    ROLLBACK_ITEMS_EXPECT_RED=()
+}
+
+rollback_report_add_unique() {
+    local array_name="$1" message="$2"
+    eval "local current=(\"\${${array_name}[@]}\")"
+    local item
+    for item in "${current[@]}"; do
+        [[ "$item" == "$message" ]] && return 0
+    done
+    eval "${array_name}+=(\"\$message\")"
+}
+
+rollback_report_reverted()   { rollback_report_add_unique "ROLLBACK_ITEMS_REVERTED" "$1"; }
+rollback_report_failed()     { rollback_report_add_unique "ROLLBACK_ITEMS_FAILED" "$1"; }
+rollback_report_manual()     { rollback_report_add_unique "ROLLBACK_ITEMS_MANUAL" "$1"; }
+rollback_report_expect_red() { rollback_report_add_unique "ROLLBACK_ITEMS_EXPECT_RED" "$1"; }
+
+register_expected_red_for_component() {
+    local component="$1" legacy stable title severity
+    for legacy in $(get_section_related_checks "$component"); do
+        [[ -n "$legacy" ]] || continue
+        stable="$(lookup_check_stable_id "$legacy")"
+        title="$(lookup_check_title "$legacy")"
+        severity="$(lookup_check_severity "$legacy")"
+        rollback_report_expect_red "${stable} (${severity}) ${title}"
+    done
+}
+
+write_rollback_action_report() {
+    ensure_governance_directories
+    mkdir -p "$(dirname "$ROLLBACK_ACTION_REPORT")" 2>/dev/null || true
+    {
+        echo "Rollback action report ($(date '+%Y-%m-%d %H:%M:%S'))"
+        echo
+        echo "[REVERTED]"
+        if (( ${#ROLLBACK_ITEMS_REVERTED[@]} == 0 )); then
+            echo "none"
+        else
+            printf '%s\n' "${ROLLBACK_ITEMS_REVERTED[@]}"
+        fi
+        echo
+        echo "[FAILED]"
+        if (( ${#ROLLBACK_ITEMS_FAILED[@]} == 0 )); then
+            echo "none"
+        else
+            printf '%s\n' "${ROLLBACK_ITEMS_FAILED[@]}"
+        fi
+        echo
+        echo "[MANUAL_REVIEW]"
+        if (( ${#ROLLBACK_ITEMS_MANUAL[@]} == 0 )); then
+            echo "none"
+        else
+            printf '%s\n' "${ROLLBACK_ITEMS_MANUAL[@]}"
+        fi
+        echo
+        echo "[EXPECTED_RED_AFTER_ROLLBACK]"
+        if (( ${#ROLLBACK_ITEMS_EXPECT_RED[@]} == 0 )); then
+            echo "none"
+        else
+            printf '%s\n' "${ROLLBACK_ITEMS_EXPECT_RED[@]}"
+        fi
+        echo
+        echo "# Note:"
+        echo "# Expected RED means: these managed checks should typically become RED again after rollback"
+        echo "# unless the system is still compliant because of pre-existing or externally managed controls."
+    } > "$ROLLBACK_ACTION_REPORT"
+}
+
+write_compliance_report() {
+    $DRY_RUN && return 0
+    $ASSESS_ONLY && return 0
+    ensure_governance_directories
+    mkdir -p "$(dirname "$COMPLIANCE_REPORT")" 2>/dev/null || true
+    local id entry raw desc normalized stable severity title mode reason cis bsi stig section
+    {
+        printf '# compliance report generated by security_script.sh v%s at %s\n' "$SCRIPT_VERSION" "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'stable_id\tlegacy_key\tseverity\tstatus_raw\tstatus_matrix\texception_mode\ttitle\tsection\tcis_controls\tbsi_controls\tstig_controls\texception_reason\tdetails\n'
+        for id in "${ASSESS_ORDER[@]}"; do
+            entry="${ASSESS_RESULTS[$id]:-}"
+            [[ -n "$entry" ]] || continue
+            raw="${entry%%:*}"
+            desc="${entry#*:}"
+            normalized="$(normalize_matrix_status "$raw")"
+            stable="${ASSESS_META_STABLE_ID[$id]:-$(lookup_check_stable_id "$id")}"
+            severity="${ASSESS_META_SEVERITY[$id]:-$(lookup_check_severity "$id")}"
+            title="${ASSESS_META_TITLE[$id]:-$(lookup_check_title "$id")}"
+            mode="${ASSESS_META_MODE[$id]:-}"
+            reason="${ASSESS_META_REASON[$id]:-}"
+            section="${CHECK_SECTION[$id]:-unknown}"
+            cis="${CHECK_CIS[$id]:-n/a}"
+            bsi="${CHECK_BSI[$id]:-n/a}"
+            stig="${CHECK_STIG[$id]:-n/a}"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$stable" "$id" "$severity" "$raw" "$normalized" "$mode" "$title" "$section" \
+                "$cis" "$bsi" "$stig" "$reason" "$(printf '%s' "$desc" | tr '\t' ' ' | tr '\n' ' ')"
+        done
+    } > "$COMPLIANCE_REPORT"
+}
+
+preferred_editor() {
+    local candidate
+    for candidate in "${EDITOR:-}" nano vim vi; do
+        [[ -n "$candidate" ]] || continue
+        command -v "$candidate" >/dev/null 2>&1 && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
+open_text_file_in_editor() {
+    local title="$1" file="$2"
+    open_embedded_script_editor "$title" "$file"
+}
 
 describe_action() {
     local key="$1"
@@ -1128,9 +1602,28 @@ ask_yes_no() {
 }
 
 is_section_skipped() {
-    local section="$1" skip_list="${AUTO_SKIP_SECTIONS:-}"
-    [[ -z "$skip_list" ]] && return 1
-    [[ ",$skip_list," == *",$section,"* ]] && return 0
+    local section="$1" skip_list="${AUTO_SKIP_SECTIONS:-}" legacy mode reason
+    LAST_SECTION_SKIP_REASON=""
+    LAST_SECTION_SKIP_MODE=""
+
+    if [[ -n "$skip_list" ]] && [[ ",$skip_list," == *",$section,"* ]]; then
+        LAST_SECTION_SKIP_REASON="section listed in AUTO_SKIP_SECTIONS"
+        LAST_SECTION_SKIP_MODE="config"
+        return 0
+    fi
+
+    for legacy in $(get_section_related_checks "$section"); do
+        [[ -n "$legacy" ]] || continue
+        mode="$(get_exception_mode_for_legacy_check "$legacy")"
+        case "$mode" in
+            disable|assessment-only)
+                reason="$(get_exception_reason_for_legacy_check "$legacy")"
+                LAST_SECTION_SKIP_REASON="${reason:-exception defined for $(lookup_check_stable_id "$legacy")}"
+                LAST_SECTION_SKIP_MODE="$mode"
+                return 0
+                ;;
+        esac
+    done
     return 1
 }
 
@@ -1264,6 +1757,7 @@ restore_file() {
         rm -f "$file" && {
             success "Removed '$file' (was added by script)."
             log_change "REMOVED_ADDED_FILE:$file"
+            rollback_report_reverted "removed script-added file: $file"
             return 0
         }
     fi
@@ -1380,7 +1874,39 @@ validate_pam_file() {
 # ============================================================================
 record_check() {
     local id="$1" status="$2" desc="$3"
+    local stable_id severity title mode reason normalized
+    stable_id="$(lookup_check_stable_id "$id")"
+    severity="$(lookup_check_severity "$id")"
+    title="$(lookup_check_title "$id")"
+    mode="$(get_exception_mode_for_legacy_check "$id")"
+    reason="$(get_exception_reason_for_legacy_check "$id")"
+    normalized="$(normalize_matrix_status "$status")"
+
+    case "$mode" in
+        disable)
+            status="EXCEPTION"
+            desc="${desc} [exception: disabled${reason:+ — $reason}]"
+            ;;
+        warn)
+            if [[ "$normalized" == "RED" ]]; then
+                status="WARN"
+                desc="${desc} [exception: downgraded to WARN${reason:+ — $reason}]"
+            elif [[ -n "$reason" ]]; then
+                desc="${desc} [exception note: ${reason}]"
+            fi
+            ;;
+        assessment-only)
+            desc="${desc} [exception: assessment-only${reason:+ — $reason}]"
+            ;;
+    esac
+
     ASSESS_RESULTS["$id"]="${status}:${desc}"
+    ASSESS_META_STABLE_ID["$id"]="$stable_id"
+    ASSESS_META_SEVERITY["$id"]="$severity"
+    ASSESS_META_TITLE["$id"]="$title"
+    ASSESS_META_MODE["$id"]="$mode"
+    ASSESS_META_REASON["$id"]="$reason"
+
     local found=false existing
     for existing in "${ASSESS_ORDER[@]+"${ASSESS_ORDER[@]}"}"; do
         [[ "$existing" == "$id" ]] && found=true && break
@@ -1391,7 +1917,7 @@ record_check() {
 normalize_matrix_status() {
     case "$1" in
         PASS|FIXED) echo "GREEN" ;;
-        INFO|WARN|SKIP|NA|N/A) echo "YELLOW" ;;
+        INFO|WARN|SKIP|NA|N/A|EXCEPTION) echo "YELLOW" ;;
         *) echo "RED" ;;
     esac
 }
@@ -2392,6 +2918,14 @@ print_security_log_summary() {
     info "${C_BOLD}$(tr_msg relevant_logs)${C_RESET}"
     echo "  - $(tr_msg log_changes_label):   $SCRIPT_LOG_FILE"
     echo "  - $(tr_msg txlog_label):     $TRANSACTION_LOG"
+    if [[ -f "$COMPLIANCE_REPORT" ]]; then
+        echo "  - Compliance-Report:   $COMPLIANCE_REPORT"
+    else
+        echo "  - Compliance-Report:   $COMPLIANCE_REPORT (wird über Punkt 11 frisch erzeugt)"
+    fi
+    [[ -f "$ROLLBACK_ACTION_REPORT" ]] && echo "  - Rollback-Report:     $ROLLBACK_ACTION_REPORT"
+    echo "  - Embedded Check-Katalog: im Skript selbst"
+    echo "  - Embedded Ausnahmen:     im Skript selbst"
     [[ -f "$AUDITD_RULES" || -f /var/log/audit/audit.log ]] && echo "  - Auditd-Rohlog:       /var/log/audit/audit.log"
     [[ -f "$AUDITD_RULES" ]] && echo "  - Auditd-Regeln:       $AUDITD_RULES"
     [[ -f "$AIDE_CRON" || -f /var/log/aide-check.log ]] && echo "  - AIDE-Sammellog:      /var/log/aide-check.log"
@@ -2425,9 +2959,479 @@ show_command_output_pagerless() {
     read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
 }
 
+show_text_file() {
+    local title="$1" file="$2"
+    echo
+    echo -e "${C_BOLD}${title}${C_RESET}"
+    echo "Path: $file"
+    echo "------------------------------------------------------------"
+    if [[ -f "$file" ]]; then
+        cat "$file"
+    else
+        warn "File not found: $file"
+    fi
+    echo
+    read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
+}
+
+resolve_user_home_dir() {
+    local user_name="$1"
+    [[ -n "$user_name" ]] || return 1
+    getent passwd "$user_name" 2>/dev/null | awk -F: '{print $6}' | head -n 1
+}
+
+find_msmtp_config_file() {
+    local candidate user_home
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        user_home=$(resolve_user_home_dir "$SUDO_USER" || true)
+        candidate="${user_home}/.msmtprc"
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    fi
+    candidate="${HOME:-/root}/.msmtprc"
+    [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    [[ -f /root/.msmtprc ]] && { printf '%s\n' '/root/.msmtprc'; return 0; }
+    return 1
+}
+
+extract_msmtp_from_address() {
+    local config_file="$1"
+    awk '/^[[:space:]]*from[[:space:]]+/ {print $2; exit}' "$config_file" 2>/dev/null
+}
+
+have_python_reportlab() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+sys.exit(0 if importlib.util.find_spec("reportlab") else 1)
+PY
+}
+
+ensure_pdf_render_dependencies() {
+    local pkgs=()
+    command -v python3 >/dev/null 2>&1 || pkgs+=("python3")
+    have_python_reportlab || pkgs+=("python3-reportlab")
+    [[ ${#pkgs[@]} -eq 0 ]] && return 0
+    if [[ "$UI_LANG" == "de" ]]; then
+        warn "Für den formatierten PDF-Report fehlen Pakete: ${pkgs[*]}"
+    else
+        warn "Missing packages for the formatted PDF report: ${pkgs[*]}"
+    fi
+    ensure_packages_installed "${pkgs[@]}"
+}
+
+ensure_pdf_encryption_dependencies() {
+    command -v qpdf >/dev/null 2>&1 && return 0
+    if [[ "$UI_LANG" == "de" ]]; then
+        warn "Für die PDF-Verschlüsselung fehlt qpdf."
+    else
+        warn "qpdf is missing for PDF encryption."
+    fi
+    ensure_packages_installed qpdf
+}
+
+prompt_min_password() {
+    local prompt="$1" confirm_prompt="$2"
+    local pw1 pw2
+    while true; do
+        IFS= read -r -s -p "$prompt" pw1 </dev/tty
+        printf '\n' > /dev/tty
+        [[ -n "$pw1" ]] || { warn "Password must not be empty."; continue; }
+        [[ ${#pw1} -ge 8 ]] || { warn "Password must be at least 8 characters long."; continue; }
+        IFS= read -r -s -p "$confirm_prompt" pw2 </dev/tty
+        printf '\n' > /dev/tty
+        [[ "$pw1" == "$pw2" ]] || { warn "Passwords do not match."; continue; }
+        printf '%s\n' "$pw1"
+        return 0
+    done
+}
+
+generate_random_owner_password() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 24 2>/dev/null && return 0
+    fi
+    tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 48
+    echo
+}
+
+verify_protected_pdf_password() {
+    local pdf_file="$1" password="$2" verify_log="${3:-}"
+    local pwfile tmpout rc=0
+    [[ -f "$pdf_file" ]] || return 1
+    pwfile=$(mktemp_tracked)
+    tmpout=$(mktemp_tracked)
+    printf '%s
+' "$password" > "$pwfile"
+    rm -f "$tmpout" 2>/dev/null || true
+    if [[ -n "$verify_log" ]]; then
+        qpdf "$pdf_file" --password-file="$pwfile" --warning-exit-0 --decrypt "$tmpout" >> "$verify_log" 2>&1 || rc=$?
+    else
+        qpdf "$pdf_file" --password-file="$pwfile" --warning-exit-0 --decrypt "$tmpout" >/dev/null 2>&1 || rc=$?
+    fi
+    [[ $rc -eq 0 && -s "$tmpout" ]]
+}
+
+generate_formatted_compliance_pdf() {
+    local input_tsv="$1" output_pdf="$2"
+    [[ -f "$input_tsv" ]] || { warn "Compliance TSV not found: $input_tsv"; return 1; }
+    ensure_governance_directories
+    mkdir -p "$(dirname "$output_pdf")" 2>/dev/null || true
+    python3 - "$input_tsv" "$output_pdf" "$SCRIPT_VERSION" "$(hostname -f 2>/dev/null || hostname)" "$(date '+%Y-%m-%d %H:%M:%S')" <<'PY'
+import csv
+import sys
+from collections import Counter
+from xml.sax.saxutils import escape
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+ts_path, pdf_path, version, host_name, generated = sys.argv[1:6]
+rows = []
+with open(ts_path, 'r', encoding='utf-8') as fh:
+    lines = [line for line in fh if line.strip() and not line.startswith('#')]
+reader = csv.DictReader(lines, delimiter='	')
+for row in reader:
+    rows.append(row)
+status_rank = {'RED': 0, 'YELLOW': 1, 'GREEN': 2}
+severity_rank = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}
+rows.sort(key=lambda r: (status_rank.get(r.get('status_matrix', 'YELLOW'), 9), severity_rank.get(r.get('severity', 'info'), 9), r.get('stable_id', '')))
+counts = Counter(r.get('status_matrix', 'UNKNOWN') for r in rows)
+styles = getSampleStyleSheet()
+styles.add(ParagraphStyle(name='Meta', fontSize=9, leading=11, textColor=colors.HexColor('#444444')))
+styles.add(ParagraphStyle(name='SectionTitle', fontSize=14, leading=17, spaceAfter=6, textColor=colors.HexColor('#16324f')))
+styles.add(ParagraphStyle(name='CheckTitle', fontSize=11, leading=14, spaceAfter=4, textColor=colors.HexColor('#10263d')))
+styles.add(ParagraphStyle(name='BodySmall', fontSize=9, leading=12, spaceAfter=4))
+styles.add(ParagraphStyle(name='StatusBadge', fontSize=8, leading=10, textColor=colors.white, alignment=1))
+
+def explanation(row):
+    title = row.get('title', 'this control').strip().rstrip('.')
+    status = row.get('status_matrix', 'YELLOW')
+    severity = row.get('severity', 'info')
+    reason = (row.get('exception_reason') or '').strip()
+    mode = (row.get('exception_mode') or '').strip()
+    lead = f"This control verifies whether {title[:1].lower() + title[1:]}." if title else "This control verifies the documented hardening requirement."
+    if mode:
+        middle = f"The result is currently handled via the exception mode '{mode}'."
+        if reason:
+            middle += f" Recorded reason: {reason}."
+    elif status == 'GREEN':
+        middle = 'The host currently meets this requirement according to the latest assessment.'
+    elif status == 'RED':
+        middle = 'The host currently does not meet this requirement and remediation should be planned.'
+    else:
+        middle = 'The result is informational or partially evaluated and should be reviewed explicitly.'
+    tail = f"It is classified as {severity} severity and mapped to the listed CIS, BSI and STIG control areas."
+    return ' '.join([lead, middle, tail])
+
+def status_color(status):
+    return {
+        'GREEN': colors.HexColor('#1f7a1f'),
+        'RED': colors.HexColor('#b11e1e'),
+        'YELLOW': colors.HexColor('#b26a00')
+    }.get(status, colors.HexColor('#4a5568'))
+
+doc = SimpleDocTemplate(pdf_path, pagesize=A4, leftMargin=16*mm, rightMargin=16*mm, topMargin=14*mm, bottomMargin=14*mm)
+story = []
+story.append(Paragraph('Linux Server Security Compliance Report', styles['Title']))
+story.append(Paragraph(f'Host: <b>{escape(host_name)}</b> &nbsp;&nbsp;|&nbsp;&nbsp; Script version: <b>{escape(version)}</b> &nbsp;&nbsp;|&nbsp;&nbsp; Generated: <b>{escape(generated)}</b>', styles['Meta']))
+story.append(Spacer(1, 6))
+summary_data = [
+    ['Metric', 'Value'],
+    ['Total checks', str(len(rows))],
+    ['GREEN', str(counts.get('GREEN', 0))],
+    ['YELLOW / INFO / WARN', str(counts.get('YELLOW', 0))],
+    ['RED', str(counts.get('RED', 0))],
+]
+summary = Table(summary_data, colWidths=[55*mm, 35*mm])
+summary.setStyle(TableStyle([
+    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#16324f')),
+    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+    ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#c5ced8')),
+    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#eef3f8')]),
+    ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+]))
+story.append(summary)
+story.append(Spacer(1, 10))
+story.append(Paragraph('Executive Summary', styles['SectionTitle']))
+red = counts.get('RED', 0)
+yellow = counts.get('YELLOW', 0)
+green = counts.get('GREEN', 0)
+exec_text = (
+    f'The current assessment found <b>{red}</b> open red finding(s), <b>{yellow}</b> yellow or informational result(s), '
+    f'and <b>{green}</b> green control(s). '
+    'The detailed section is ordered by operational relevance so that open gaps appear first, followed by partial or informational results, and then the controls that already meet the baseline.'
+)
+story.append(Paragraph(exec_text, styles['BodySmall']))
+story.append(Paragraph('Each control contains a short interpretation, the current technical detail, and the mapped CIS, BSI and STIG references to support both operations and audit review.', styles['BodySmall']))
+story.append(Spacer(1, 8))
+story.append(Paragraph('Detailed Control Results', styles['SectionTitle']))
+for row in rows:
+    stable_id = escape(row.get('stable_id', 'UNKNOWN'))
+    title = escape(row.get('title', 'Untitled control'))
+    status = row.get('status_matrix', 'YELLOW')
+    severity = escape(row.get('severity', 'info'))
+    section = escape(row.get('section', 'unknown'))
+    details = escape(row.get('details', '') or 'No additional technical detail recorded.')
+    cis = escape(row.get('cis_controls', 'n/a'))
+    bsi = escape(row.get('bsi_controls', 'n/a'))
+    stig = escape(row.get('stig_controls', 'n/a'))
+    reason = escape((row.get('exception_reason') or '').strip())
+    mode = escape((row.get('exception_mode') or '').strip())
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(f'<b>{stable_id}</b> — {title}', styles['CheckTitle']))
+    badge = Table([[Paragraph(status, styles['StatusBadge'])]], colWidths=[24*mm], rowHeights=[6*mm])
+    badge.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), status_color(status)),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOX', (0, 0), (-1, -1), 0.25, status_color(status)),
+    ]))
+    meta = Table([[badge, Paragraph(f'<b>Severity:</b> {severity}<br/><b>Section:</b> {section}', styles['BodySmall'])]], colWidths=[28*mm, 142*mm])
+    meta.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(meta)
+    story.append(Paragraph(escape(explanation(row)), styles['BodySmall']))
+    story.append(Paragraph(f'<b>Technical detail:</b> {details}', styles['BodySmall']))
+    story.append(Paragraph(f'<b>Compliance mapping:</b> CIS: {cis}<br/>BSI: {bsi}<br/>STIG: {stig}', styles['BodySmall']))
+    if mode or reason:
+        extra = f'<b>Exception handling:</b> mode={mode or "n/a"}'
+        if reason:
+            extra += f'<br/><b>Exception reason:</b> {reason}'
+        story.append(Paragraph(extra, styles['BodySmall']))
+    story.append(Table([['']], colWidths=[178*mm], rowHeights=[0.6*mm], style=TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#d7dee7'))])))
+
+def add_page_number(canvas, doc):
+    canvas.setFont('Helvetica', 8)
+    canvas.setFillColor(colors.HexColor('#555555'))
+    canvas.drawRightString(A4[0] - 16*mm, 8*mm, f'Page {doc.page}')
+
+doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+PY
+}
+
+encrypt_pdf_with_password() {
+    local input_pdf="$1" output_pdf="$2" password="$3"
+    local owner_password qpdf_log qpdf_version
+    [[ -f "$input_pdf" ]] || { warn "Input PDF not found: $input_pdf"; return 1; }
+    [[ ${#password} -ge 8 ]] || { warn "Password must be at least 8 characters long."; return 1; }
+    ensure_pdf_encryption_dependencies || return 1
+    owner_password=$(generate_random_owner_password)
+    [[ -n "$owner_password" ]] || { warn "Could not generate random PDF owner password."; return 1; }
+    ensure_governance_directories
+    qpdf_log="${GOVERNANCE_REPORT_DIR}/qpdf_encrypt.log"
+    rm -f "$output_pdf" 2>/dev/null || true
+    qpdf_version=$(qpdf --version 2>/dev/null | head -n 1 || true)
+    {
+        printf 'timestamp=%s
+' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'input_pdf=%s
+' "$input_pdf"
+        printf 'output_pdf=%s
+' "$output_pdf"
+        printf 'qpdf_version=%s
+' "${qpdf_version:-unknown}"
+    } > "$qpdf_log"
+    if ! qpdf --encrypt "$password" "$owner_password" 256 -- "$input_pdf" "$output_pdf" >> "$qpdf_log" 2>&1; then
+        rm -f "$output_pdf" 2>/dev/null || true
+        warn "qpdf encryption command failed."
+        warn "See: $qpdf_log"
+        return 1
+    fi
+    if ! verify_protected_pdf_password "$output_pdf" "$password" "$qpdf_log"; then
+        rm -f "$output_pdf" 2>/dev/null || true
+        warn "Protected PDF verification failed with the entered password."
+        warn "See: $qpdf_log"
+        return 1
+    fi
+    success "Protected PDF verification succeeded with the entered password."
+    return 0
+}
+
+send_attachment_via_msmtp() {
+    local attachment="$1" recipient="$2" subject="$3" body_text="$4"
+    local msmtp_config from_addr host_name boundary filename
+
+    [[ -f "$attachment" ]] || { warn "Attachment not found: $attachment"; return 1; }
+    command -v msmtp >/dev/null 2>&1 || {
+        if [[ "$UI_LANG" == "de" ]]; then
+            warn "msmtp ist nicht installiert."
+        else
+            warn "msmtp is not installed."
+        fi
+        ensure_packages_installed msmtp msmtp-mta || return 1
+    }
+    msmtp_config=$(find_msmtp_config_file) || { warn "No usable .msmtprc found for root or the invoking user."; return 1; }
+    from_addr=$(extract_msmtp_from_address "$msmtp_config")
+    host_name=$(hostname -f 2>/dev/null || hostname)
+    [[ -n "$from_addr" ]] || from_addr="root@${host_name}"
+    boundary="====SECURITY_SCRIPT_$(date +%s)_$$===="
+    filename=$(basename "$attachment")
+
+    {
+        printf 'To: %s
+' "$recipient"
+        printf 'From: %s
+' "$from_addr"
+        printf 'Subject: %s
+' "$subject"
+        printf 'Date: %s
+' "$(LC_ALL=C date -R)"
+        printf 'MIME-Version: 1.0
+'
+        printf 'Content-Type: multipart/mixed; boundary="%s"
+' "$boundary"
+        printf '
+'
+        printf -- '--%s
+' "$boundary"
+        printf 'Content-Type: text/plain; charset=UTF-8
+'
+        printf 'Content-Transfer-Encoding: 8bit
+
+'
+        printf '%b
+
+' "$body_text"
+        printf -- '--%s
+' "$boundary"
+        printf 'Content-Type: application/pdf; name="%s"
+' "$filename"
+        printf 'Content-Transfer-Encoding: base64
+'
+        printf 'Content-Disposition: attachment; filename="%s"
+
+' "$filename"
+        base64 -w 76 "$attachment"
+        printf '
+--%s--
+' "$boundary"
+    } | msmtp --file="$msmtp_config" -t
+}
+
+generate_compliance_report_from_live_state() {
+    local old_assess="$ASSESS_ONLY" old_verify="$VERIFY_AFTER_HARDENING" old_dry="$DRY_RUN"
+    local tmp_output
+    tmp_output=$(mktemp_tracked)
+
+    ensure_governance_directories
+    ASSESS_ONLY=false
+    VERIFY_AFTER_HARDENING=false
+    DRY_RUN=false
+    declare -gA ASSESS_RESULTS=()
+    declare -ga ASSESS_ORDER=()
+
+    if ! run_assessment >"$tmp_output" 2>&1; then
+        cat "$tmp_output" >&2
+        ASSESS_ONLY="$old_assess"
+        VERIFY_AFTER_HARDENING="$old_verify"
+        DRY_RUN="$old_dry"
+        return 1
+    fi
+    write_compliance_report
+    ASSESS_ONLY="$old_assess"
+    VERIFY_AFTER_HARDENING="$old_verify"
+    DRY_RUN="$old_dry"
+    return 0
+}
+
+handle_compliance_report_menu() {
+    local recipient subject pdf_password body_text answer
+    local pdf_generated=false protected_pdf_generated=false
+
+    info "$( [[ "$UI_LANG" == "de" ]] && echo 'Erzeuge frischen Compliance-Report aus dem aktuellen Systemzustand ...' || echo 'Generating a fresh compliance report from the current system state ...' )"
+    if ! generate_compliance_report_from_live_state; then
+        warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Compliance-Report konnte nicht erzeugt werden.' || echo 'Could not generate compliance report.' )"
+        read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
+        return 1
+    fi
+
+    success "$( [[ "$UI_LANG" == "de" ]] && echo 'Compliance-Report wurde aktualisiert.' || echo 'Compliance report refreshed.' )"
+    echo "TSV: $COMPLIANCE_REPORT"
+
+    if ensure_pdf_render_dependencies; then
+        if generate_formatted_compliance_pdf "$COMPLIANCE_REPORT" "$COMPLIANCE_REPORT_PDF"; then
+            pdf_generated=true
+            success "$( [[ "$UI_LANG" == "de" ]] && echo 'Formatierter PDF-Report wurde erzeugt.' || echo 'Formatted PDF report generated.' )"
+            echo "PDF: $COMPLIANCE_REPORT_PDF"
+        else
+            warn "$( [[ "$UI_LANG" == "de" ]] && echo 'PDF-Report konnte nicht erzeugt werden.' || echo 'Could not generate PDF report.' )"
+        fi
+    else
+        warn "$( [[ "$UI_LANG" == "de" ]] && echo 'PDF-Report wurde wegen fehlender Pakete nicht erzeugt.' || echo 'PDF report was not generated because required packages are missing.' )"
+    fi
+
+    echo
+    if [[ "$UI_LANG" == "de" ]]; then
+        read -rp "E-Mail-Adresse für Versand eingeben (Enter = kein Versand): " recipient </dev/tty
+    else
+        read -rp "Enter recipient email address to send the report (Enter = no mail delivery): " recipient </dev/tty
+    fi
+
+    if [[ -n "$recipient" ]]; then
+        if validate_email "$recipient"; then
+            if ! $pdf_generated; then
+                ensure_pdf_render_dependencies && generate_formatted_compliance_pdf "$COMPLIANCE_REPORT" "$COMPLIANCE_REPORT_PDF" && pdf_generated=true
+            fi
+            if ! $pdf_generated; then
+                warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Kein PDF verfügbar. Versand wird aus Sicherheitsgründen abgebrochen.' || echo 'No PDF available. Sending is aborted for security reasons.' )"
+            else
+                if [[ "$UI_LANG" == "de" ]]; then
+                    pdf_password=$(prompt_min_password "PDF-Passwort (mindestens 8 Zeichen): " "PDF-Passwort bestätigen: ")
+                else
+                    pdf_password=$(prompt_min_password "PDF password (minimum 8 characters): " "Confirm PDF password: ")
+                fi
+                if [[ -n "$pdf_password" ]]; then
+                    if encrypt_pdf_with_password "$COMPLIANCE_REPORT_PDF" "$COMPLIANCE_REPORT_PDF_PROTECTED" "$pdf_password"; then
+                        protected_pdf_generated=true
+                        subject="Compliance Report - $(hostname -f 2>/dev/null || hostname) - $(date '+%Y-%m-%d %H:%M:%S')"
+                        body_text="Compliance report generated by security_script.sh v${SCRIPT_VERSION}
+Host: $(hostname -f 2>/dev/null || hostname)
+Generated: $(date '+%Y-%m-%d %H:%M:%S')
+Local TSV path: ${COMPLIANCE_REPORT}
+Local PDF path: ${COMPLIANCE_REPORT_PDF_PROTECTED}
+
+The attached PDF is password-protected. Share the password via a separate communication channel."
+                        if send_attachment_via_msmtp "$COMPLIANCE_REPORT_PDF_PROTECTED" "$recipient" "$subject" "$body_text"; then
+                            success "$( [[ "$UI_LANG" == "de" ]] && echo "Geschützter PDF-Report an $recipient gesendet." || echo "Protected PDF report sent to $recipient." )"
+                        else
+                            warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Versand fehlgeschlagen. Die Dateien bleiben lokal gespeichert.' || echo 'Sending failed. The files remain available locally.' )"
+                        fi
+                    else
+                        warn "$( [[ "$UI_LANG" == "de" ]] && echo 'PDF-Verschlüsselung fehlgeschlagen. Versand wurde nicht durchgeführt.' || echo 'PDF encryption failed. The report was not sent.' )"
+                    fi
+                fi
+            fi
+        else
+            warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Ungültige E-Mail-Adresse. Es erfolgt kein Versand.' || echo 'Invalid email address. No mail will be sent.' )"
+        fi
+    fi
+
+    echo
+    info "$( [[ "$UI_LANG" == "de" ]] && echo 'Erzeugte Report-Artefakte:' || echo 'Generated report artifacts:' )"
+    echo "  - TSV: $COMPLIANCE_REPORT"
+    $pdf_generated && echo "  - PDF: $COMPLIANCE_REPORT_PDF"
+    $protected_pdf_generated && echo "  - PDF (protected): $COMPLIANCE_REPORT_PDF_PROTECTED"
+
+    if [[ "$UI_LANG" == "de" ]]; then
+        read -rp "Rohdaten-TSV jetzt anzeigen? [y/N]: " answer </dev/tty
+    else
+        read -rp "Show raw TSV now? [y/N]: " answer </dev/tty
+    fi
+    case "$answer" in
+        y|Y|yes|YES|j|J) show_text_file "Compliance Report (TSV)" "$COMPLIANCE_REPORT" ;;
+        *) read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty ;;
+    esac
+}
+
 view_logs_menu() {
     local selection latest_aide_report prompt
     while true; do
+        ensure_governance_files
         echo
         echo -e "${C_BOLD}${C_CYAN}$( [[ "$UI_LANG" == "de" ]] && echo 'Logs / Reports' || echo 'Logs / reports' )${C_RESET}"
         echo "  1) $( [[ "$UI_LANG" == "de" ]] && echo 'Security-Log-Übersicht' || echo 'Security log summary' )"
@@ -2440,9 +3444,15 @@ view_logs_menu() {
         echo "  8) auditd Raw Log"
         echo "  9) $( [[ "$UI_LANG" == "de" ]] && echo 'Skript-Änderungslog' || echo 'Script change log' )"
         echo " 10) $( [[ "$UI_LANG" == "de" ]] && echo 'Transaktionslog' || echo 'Transaction log' )"
+        echo " 11) $( [[ "$UI_LANG" == "de" ]] && echo 'Compliance-Report' || echo 'Compliance report' )"
+        echo " 12) $( [[ "$UI_LANG" == "de" ]] && echo 'Rollback-Report' || echo 'Rollback report' )"
+        echo " 13) $( [[ "$UI_LANG" == "de" ]] && echo 'Eingebetteten Check-Katalog anzeigen' || echo 'Show embedded check catalog' )"
+        echo " 14) $( [[ "$UI_LANG" == "de" ]] && echo 'Eingebettete Ausnahmen anzeigen' || echo 'Show embedded exceptions' )"
+        echo " 15) $( [[ "$UI_LANG" == "de" ]] && echo 'Dieses Skript bearbeiten (Governance)' || echo 'Edit this script (governance)' )"
+        echo " 16) $( [[ "$UI_LANG" == "de" ]] && echo 'Dieses Skript bearbeiten (Ausnahmen-Block)' || echo 'Edit this script (exceptions block)' )"
         echo "  0) $( [[ "$UI_LANG" == "de" ]] && echo 'Zurück' || echo 'Back' )"
         echo
-        prompt=$( [[ "$UI_LANG" == "de" ]] && echo 'Auswahl [0-10]: ' || echo 'Selection [0-10]: ' )
+        prompt=$( [[ "$UI_LANG" == "de" ]] && echo 'Auswahl [0-16]: ' || echo 'Selection [0-16]: ' )
         read -rp "$prompt" selection </dev/tty
         case "$selection" in
             1) print_security_log_summary; read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty ;;
@@ -2455,6 +3465,12 @@ view_logs_menu() {
             8) show_log_file_tail "auditd Raw Log" "/var/log/audit/audit.log" 120 ;;
             9) show_log_file_tail "Script Change Log" "$SCRIPT_LOG_FILE" 120 ;;
             10) show_log_file_tail "Transaction Log" "$TRANSACTION_LOG" 120 ;;
+            11) handle_compliance_report_menu ;;
+            12) show_text_file "Rollback Report" "$ROLLBACK_ACTION_REPORT" ;;
+            13) show_generated_text "Embedded Check Catalog" emit_embedded_check_catalog ;;
+            14) show_generated_text "Embedded Exceptions" emit_embedded_exceptions_view ;;
+            15) open_embedded_script_editor "Edit This Script (Governance)" "EMBEDDED USER EXCEPTION BLOCK" false ;;
+            16) open_embedded_script_editor "Edit This Script (Exceptions Block)" "EMBEDDED_EXCEPTION_MODE" true ;;
             0) return 0 ;;
             *) warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Ungültige Auswahl.' || echo 'Invalid selection.' )" ;;
         esac
@@ -2971,6 +3987,7 @@ ssh_selective_prune_keys() {
 
 rollback_ssh_baseline_component() {
     info "${C_BOLD}Selective rollback: ssh_baseline${C_RESET}"
+    register_expected_red_for_component "ssh_baseline"
     ssh_selective_prune_keys "ssh_baseline" \
         AllowAgentForwarding AllowTcpForwarding ChallengeResponseAuthentication KbdInteractiveAuthentication \
         ClientAliveCountMax ClientAliveInterval LoginGraceTime MaxAuthTries MaxSessions \
@@ -2979,11 +3996,13 @@ rollback_ssh_baseline_component() {
 
 rollback_ssh_crypto_component() {
     info "${C_BOLD}Selective rollback: ssh_crypto${C_RESET}"
+    register_expected_red_for_component "ssh_crypto"
     ssh_selective_prune_keys "ssh_crypto" MACs Ciphers KexAlgorithms HostKeyAlgorithms PubkeyAcceptedAlgorithms
 }
 
 rollback_ssh_google_2fa_component() {
     info "${C_BOLD}Selective rollback: ssh_google_2fa${C_RESET}"
+    register_expected_red_for_component "ssh_google_2fa"
     local pam_file="/etc/pam.d/sshd" sshd_cfg="/etc/ssh/sshd_config"
     local target_user="${SUDO_USER:-$(whoami)}"
     local user_home; user_home=$(eval echo "~$target_user")
@@ -3071,6 +4090,7 @@ rollback_ssh_google_2fa_component() {
 
 rollback_fail2ban_component() {
     info "${C_BOLD}Selective rollback: fail2ban${C_RESET}"
+    register_expected_red_for_component "fail2ban"
     restore_file "/etc/fail2ban/jail.local"
     systemctl disable --now fail2ban >/dev/null 2>&1 || true
     remove_packages_if_present "fail2ban"
@@ -3079,6 +4099,7 @@ rollback_fail2ban_component() {
 
 rollback_unattended_upgrades_component() {
     info "${C_BOLD}Selective rollback: unattended_upgrades${C_RESET}"
+    register_expected_red_for_component "unattended_upgrades"
     restore_file "/etc/apt/apt.conf.d/20auto-upgrades"
     restore_file "/etc/apt/apt.conf.d/50unattended-upgrades"
     remove_packages_if_present "unattended-upgrades"
@@ -3086,6 +4107,7 @@ rollback_unattended_upgrades_component() {
 
 rollback_clamav_component() {
     info "${C_BOLD}Selective rollback: clamav${C_RESET}"
+    register_expected_red_for_component "clamav"
     systemctl disable --now clamav-daemon clamav-freshclam >/dev/null 2>&1 || true
     remove_packages_if_present "clamav-daemon" "clamav-freshclam" "clamav"
     info "  Virensignaturen unter /var/lib/clamav bleiben in der Regel erhalten."
@@ -3093,12 +4115,14 @@ rollback_clamav_component() {
 
 rollback_ufw_component() {
     info "${C_BOLD}Selective rollback: ufw${C_RESET}"
+    register_expected_red_for_component "ufw"
     command -v ufw >/dev/null 2>&1 && ufw --force disable >/dev/null 2>&1 && success "  ✔ UFW disabled." || true
     remove_packages_if_present "ufw"
 }
 
 rollback_banners_component() {
     info "${C_BOLD}Selective rollback: banners${C_RESET}"
+    register_expected_red_for_component "banners"
     clear_managed_banner_file "$BANNER_FILE"
     clear_managed_banner_file "$MOTD_FILE"
     remove_sshd_banner_reference_if_needed
@@ -3106,6 +4130,7 @@ rollback_banners_component() {
 
 rollback_ssh_component() {
     info "${C_BOLD}Selective rollback: ssh${C_RESET}"
+    register_expected_red_for_component "ssh"
     rollback_ssh_crypto_component || return 1
     echo
     rollback_ssh_baseline_component
@@ -3114,6 +4139,7 @@ rollback_ssh_component() {
 
 rollback_auditd_component() {
     info "${C_BOLD}Selective rollback: auditd${C_RESET}"
+    register_expected_red_for_component "auditd"
     restore_file "$AUDITD_RULES"
     if [[ -f "$AUDITD_RULES" ]]; then
         command -v augenrules >/dev/null 2>&1 && augenrules --load >/dev/null 2>&1 || true
@@ -3128,6 +4154,7 @@ rollback_auditd_component() {
 
 rollback_aide_component() {
     info "${C_BOLD}Selective rollback: aide${C_RESET}"
+    register_expected_red_for_component "aide"
     restore_file "$AIDE_CRON"
     restore_file "$AIDE_LOCAL_EXCLUDES"
     if [[ -f /var/lib/aide/aide.db || -f /var/lib/aide/aide.db.new || -f /var/lib/aide/aide.db.gz || -f /var/lib/aide/aide.conf.autogenerated ]]; then
@@ -3140,6 +4167,7 @@ rollback_aide_component() {
 
 rollback_pam_component() {
     info "${C_BOLD}Selective rollback: pam${C_RESET}"
+    register_expected_red_for_component "pam"
     restore_file "$PWQUALITY_CONF"
     restore_file "$FAILLOCK_CONF"
     finalize_pam_rollback_state true
@@ -3147,6 +4175,7 @@ rollback_pam_component() {
 
 rollback_login_umask_component() {
     info "${C_BOLD}Selective rollback: login_umask${C_RESET}"
+    register_expected_red_for_component "login_umask"
     restore_file "$LOGIN_DEFS_FILE"
 
     if [[ -f "${PROFILE_UMASK_FILE}${BACKUP_SUFFIX}" ]]; then
@@ -3169,10 +4198,12 @@ rollback_login_umask_component() {
 
     command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
     info "  Existing services keep their current umask until restart/reboot; assessment should turn RED again immediately because the managed baseline was removed."
+    rollback_report_manual "review service restarts after umask rollback (existing processes keep prior umask until restart/reboot)"
 }
 
 rollback_suid_sgid_component() {
     info "${C_BOLD}Selective rollback: suid_sgid${C_RESET}"
+    register_expected_red_for_component "suid_sgid"
     restore_file "$SUID_SGID_AUDIT_CRON"
     restore_file "$SUID_SGID_AUDIT_SCRIPT"
     if [[ -f "$SUID_SGID_AUDIT_CRON" ]]; then
@@ -3207,6 +4238,7 @@ finalize_pam_rollback_state() {
 
 rollback_sysctl_component() {
     info "${C_BOLD}Selective rollback: sysctl${C_RESET}"
+    register_expected_red_for_component "sysctl"
     restore_file "$SYSCTL_CONFIG_FILE"
     sysctl --system >/dev/null 2>&1 && success "  ✔ Sysctl reloaded." || warn "  Sysctl reload failed."
 }
@@ -3219,12 +4251,14 @@ rollback_journald_component() {
 
 rollback_sudoers_component() {
     info "${C_BOLD}Selective rollback: sudoers${C_RESET}"
+    register_expected_red_for_component "sudoers"
     restore_file "$SUDOERS_TTY_FILE"
     visudo -cf /etc/sudoers >/dev/null 2>&1 && success "  ✔ sudoers syntax verified." || warn "  visudo reported a syntax issue."
 }
 
 rollback_modules_component() {
     info "${C_BOLD}Selective rollback: modules${C_RESET}"
+    register_expected_red_for_component "modules"
     restore_file "$MODPROBE_BLACKLIST"
     command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u >/dev/null 2>&1 && success "  ✔ initramfs updated." || true
 }
@@ -3239,6 +4273,7 @@ archive_transaction_log() {
 
 run_selective_removal() {
     local raw_targets="$1"
+    rollback_report_reset
     local normalized selected_from_menu target errors=0
     local -a targets=()
     local -a effective_targets=()
@@ -3310,6 +4345,7 @@ run_selective_removal() {
         echo
     done
 
+    write_rollback_action_report
     print_security_log_summary
     (( errors == 0 ))
 }
@@ -3411,9 +4447,11 @@ print_rollback_validation_report() {
         warn "Some findings are now RED although the original baseline was GREEN. Review the rollback validation report."
     fi
     info "Validation details: $report"
+    [[ -f "$ROLLBACK_ACTION_REPORT" ]] && info "Rollback action report: $ROLLBACK_ACTION_REPORT"
 }
 
 run_full_rollback() {
+    rollback_report_reset
     echo
     echo -e "${C_BOLD}${C_RED_BOLD}╔══════════════════════════════════════════════════════════════╗${C_RESET}"
     echo -e "${C_BOLD}${C_RED_BOLD}║           ROLLBACK — RESTORING ORIGINAL SYSTEM STATE        ║${C_RESET}"
@@ -3422,6 +4460,21 @@ run_full_rollback() {
     info "Rollback runs fully automated and non-interactively."
 
     local errors=0
+
+    register_expected_red_for_component "ssh"
+    register_expected_red_for_component "unattended_upgrades"
+    register_expected_red_for_component "ufw"
+    register_expected_red_for_component "fail2ban"
+    register_expected_red_for_component "clamav"
+    register_expected_red_for_component "auditd"
+    register_expected_red_for_component "aide"
+    register_expected_red_for_component "sysctl"
+    register_expected_red_for_component "sudoers"
+    register_expected_red_for_component "login_umask"
+    register_expected_red_for_component "suid_sgid"
+    register_expected_red_for_component "pam"
+    register_expected_red_for_component "banners"
+    register_expected_red_for_component "modules"
 
     if [[ ! -f "$TRANSACTION_LOG" ]]; then
         warn "No transaction log found at $TRANSACTION_LOG."
@@ -3436,9 +4489,11 @@ run_full_rollback() {
         info "  Restoring: $original"
         if mv "$backup" "$original"; then
             success "  ✔ Restored: $original"
+            rollback_report_reverted "restored backup during full rollback: $original"
             backup_count=$((backup_count+1))
         else
             error "  ✘ Failed to restore: $original"
+            rollback_report_failed "failed to restore backup during full rollback: $original"
             errors=$((errors+1))
         fi
     done < <(find /etc /home /root -name "*${BACKUP_SUFFIX}" -print0 2>/dev/null | sort -z)
@@ -3464,7 +4519,7 @@ run_full_rollback() {
         if [[ -f "$f" ]] && ! [[ -f "${f}${BACKUP_SUFFIX}" ]]; then
             if grep -q "generated by security_script.sh" "$f" 2>/dev/null || \
                grep -q "Generated by security_script.sh" "$f" 2>/dev/null; then
-                rm -f "$f" && success "  ✔ Removed: $f" || { error "  ✘ Failed to remove: $f"; errors=$((errors+1)); }
+                rm -f "$f" && { success "  ✔ Removed: $f"; rollback_report_reverted "removed generated file during full rollback: $f"; } || { error "  ✘ Failed to remove: $f"; rollback_report_failed "failed to remove generated file during full rollback: $f"; errors=$((errors+1)); }
             fi
         fi
     done
@@ -3543,6 +4598,8 @@ run_full_rollback() {
         echo -e "${C_RED_BOLD}╚══════════════════════════════════════════════════════╝${C_RESET}"
     fi
     echo
+    rollback_report_manual "reboot recommended to ensure rollback is fully effective"
+    write_rollback_action_report
     warn "A REBOOT is recommended to fully apply the rollback."
 }
 
@@ -3857,50 +4914,69 @@ run_assessment() {
 print_assessment_report() {
     local green=0 yellow=0 red=0
 
-    echo
-    echo -e "${C_BOLD}${C_CYAN}╔══════════════════════════════════════════════════════════════════════╗${C_RESET}"
-    echo -e "${C_BOLD}${C_CYAN}║                   SECURITY RED / GREEN MATRIX                       ║${C_RESET}"
-    echo -e "${C_BOLD}${C_CYAN}╚══════════════════════════════════════════════════════════════════════╝${C_RESET}"
-    printf "  %-28s %-8s %s
-" "CHECK" "STATUS" "DETAILS"
-    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..70})${C_RESET}"
+    write_compliance_report
 
-    local id entry raw desc normalized color label
+    echo
+    echo -e "${C_BOLD}${C_CYAN}╔════════════════════════════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}║                 SECURITY / COMPLIANCE MATRIX (ID + SEVERITY)                     ║${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}╚════════════════════════════════════════════════════════════════════════════════════╝${C_RESET}"
+    printf "  %-14s %-8s %-8s %s
+" "CHECK-ID" "SEV" "STATUS" "DETAILS"
+    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..92})${C_RESET}"
+
+    local id entry raw desc normalized color label stable severity title mode first line
     for id in "${ASSESS_ORDER[@]}"; do
         entry="${ASSESS_RESULTS[$id]}"
-        raw="${entry%%:*}"; desc="${entry#*:}"
+        raw="${entry%%:*}"
+        desc="${entry#*:}"
         normalized="$(normalize_matrix_status "$raw")"
-        case "$normalized" in
-            GREEN)  color="$C_GREEN_BOLD";  label="GREEN"; green=$((green+1)) ;;
-            YELLOW) color="$C_YELLOW_BOLD"; label="WARN" ; yellow=$((yellow+1)) ;;
-            RED)    color="$C_RED_BOLD";    label=" RED " ; red=$((red+1)) ;;
+        stable="${ASSESS_META_STABLE_ID[$id]:-$(lookup_check_stable_id "$id")}"
+        severity="${ASSESS_META_SEVERITY[$id]:-$(lookup_check_severity "$id")}"
+        title="${ASSESS_META_TITLE[$id]:-$(lookup_check_title "$id")}"
+        mode="${ASSESS_META_MODE[$id]:-}"
+        case "$raw" in
+            EXCEPTION) color="$C_YELLOW_BOLD"; label="EXC"; yellow=$((yellow+1)) ;;
+            *)
+                case "$normalized" in
+                    GREEN)  color="$C_GREEN_BOLD";  label="GREEN"; green=$((green+1)) ;;
+                    YELLOW) color="$C_YELLOW_BOLD"; label="WARN" ; yellow=$((yellow+1)) ;;
+                    RED)    color="$C_RED_BOLD";    label="RED"  ; red=$((red+1)) ;;
+                esac
+                ;;
         esac
-        local check_name wrapped first=true line
-        check_name="$(echo "$id" | tr '_' ' ' | cut -c1-28)"
+        first=true
         while IFS= read -r line; do
             if $first; then
-                printf "  ${color}%-28s %-8s${C_RESET} %s
-" "$check_name" "$label" "$line"
+                printf "  ${color}%-14s %-8s %-8s${C_RESET} %s
+" "$stable" "$severity" "$label" "$line"
                 first=false
             else
-                printf "  %-28s %-8s %s
-" "" "" "$line"
+                printf "  %-14s %-8s %-8s %s
+" "" "" "" "$line"
             fi
         done < <(printf '%s
-' "$desc" | fold -s -w 90)
+' "${title} — ${desc}" | fold -s -w 92)
+        if [[ -n "$mode" ]]; then
+            printf "  %-14s %-8s %-8s %s
+" "" "" "" "mode=${mode} | $(lookup_check_controls_compact "$id")"
+        else
+            printf "  %-14s %-8s %-8s %s
+" "" "" "" "$(lookup_check_controls_compact "$id")"
+        fi
     done
 
-    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..70})${C_RESET}"
+    echo -e "  ${C_CYAN}$(printf '%.0s─' {1..92})${C_RESET}"
     echo
     local total=$(( green + yellow + red ))
     local score=0; (( (green + red) > 0 )) && score=$(( green * 100 / (green + red) ))
 
-    echo -e "  ${C_BOLD}$(tr_msg result_label):${C_RESET}  ${C_GREEN_BOLD}GREEN: ${green}${C_RESET}   ${C_YELLOW_BOLD}WARN: ${yellow}${C_RESET}   ${C_RED_BOLD}RED: ${red}${C_RESET}   (${total} Checks)"
+    echo -e "  ${C_BOLD}$(tr_msg result_label):${C_RESET}  ${C_GREEN_BOLD}GREEN: ${green}${C_RESET}   ${C_YELLOW_BOLD}WARN/EXC: ${yellow}${C_RESET}   ${C_RED_BOLD}RED: ${red}${C_RESET}   (${total} Checks)"
+    echo -e "  ${C_BOLD}Compliance report:${C_RESET} $COMPLIANCE_REPORT"
     echo
     if (( red == 0 && yellow == 0 )); then
         echo -e "  ${C_GREEN_BOLD}$(tr_msg matrix_green)${C_RESET}"
     elif (( red == 0 )); then
-        echo -e "  ${C_YELLOW_BOLD}Assessment completed with advisory findings only — no blocking RED findings.${C_RESET}"
+        echo -e "  ${C_YELLOW_BOLD}Assessment completed with advisory / excepted findings only — no blocking RED findings.${C_RESET}"
     elif (( score >= 75 )); then
         echo -e "  ${C_YELLOW_BOLD}$(tr_msg matrix_warn_prefix) ${red} $(tr_msg matrix_warn_suffix)${C_RESET}"
     else
@@ -3915,7 +4991,7 @@ print_assessment_report() {
 configure_ssh_key_and_users() {
     info "${C_BOLD}1. SSH Key Pair (Ed25519)${C_RESET}"
     describe_action "ssh_key"
-    is_section_skipped "ssh_key" && { info "Skipped."; record_check "SSH_KEY_GEN" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "ssh_key" && { info "Skipped."; record_check "SSH_KEY_GEN" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Execute SSH Key step?" "y" || { record_check "SSH_KEY_GEN" "SKIP" "User skipped"; echo; return 0; }
 
     local current_user="${SUDO_USER:-$(whoami)}"
@@ -4814,7 +5890,7 @@ ${key}=${desired}" >> "$tc"
 configure_clamav() {
     info "${C_BOLD}8. ClamAV Antivirus${C_RESET}"
     describe_action "clamav"
-    is_section_skipped "clamav" && { info "Skipped."; record_check "CLAMAV" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "clamav" && { info "Skipped."; record_check "CLAMAV" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Install/configure ClamAV?" "y" || { echo; return 0; }
 
     ensure_packages_installed "clamav" "clamav-daemon" || { record_check "CLAMAV" "FAIL" "Package install skipped/failed"; section_done 8; return 0; }
@@ -4959,7 +6035,7 @@ Defaults tty_tickets
 configure_login_umask() {
     info "${C_BOLD}10a. System-wide default umask${C_RESET}"
     info "Hardens default permissions for interactive logins and future systemd-managed services/users. Existing running services keep their current umask until restart/reboot."
-    is_section_skipped "login_umask" && { info "Skipped."; record_check "LOGIN_UMASK" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "login_umask" && { info "Skipped."; record_check "LOGIN_UMASK" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Configure restrictive system-wide default umask?" "y" || { record_check "LOGIN_UMASK" "SKIP" "User skipped"; echo; return 0; }
     mark_section_executed
 
@@ -5026,7 +6102,7 @@ UMASK_EOF
 configure_suid_sgid_inventory() {
     info "${C_BOLD}10b. SUID/SGID inventory baseline${C_RESET}"
     info "Creates a daily audit-only inventory; it does not remove binaries automatically."
-    is_section_skipped "suid_sgid" && { info "Skipped."; record_check "SUID_SGID_BASELINE" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "suid_sgid" && { info "Skipped."; record_check "SUID_SGID_BASELINE" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Install daily SUID/SGID inventory baseline?" "y" || { record_check "SUID_SGID_BASELINE" "SKIP" "User skipped"; echo; return 0; }
     mark_section_executed
 
@@ -5095,7 +6171,7 @@ CRON_EOF
 configure_auditd() {
     info "${C_BOLD}11. auditd — Linux Audit Daemon (extended)${C_RESET}"
     describe_action "auditd"
-    is_section_skipped "auditd" && { info "Skipped."; record_check "AUDITD" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "auditd" && { info "Skipped."; record_check "AUDITD" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Install/configure auditd?" "y" || { record_check "AUDITD" "SKIP" "User skipped"; echo; return 0; }
     mark_section_executed
 
@@ -5238,7 +6314,7 @@ AUDITD_EOF
 configure_aide() {
     info "${C_BOLD}12. AIDE — File Integrity Monitoring${C_RESET}"
     describe_action "aide"
-    is_section_skipped "aide" && { info "Skipped."; record_check "AIDE" "SKIP" "Skipped via config"; echo; return 0; }
+    is_section_skipped "aide" && { info "Skipped."; record_check "AIDE" "SKIP" "$(section_skip_record_desc)"; echo; return 0; }
     ask_yes_no "Install/configure AIDE?" "y" || { record_check "AIDE" "SKIP" "User skipped"; echo; return 0; }
     mark_section_executed
 
@@ -5750,10 +6826,15 @@ main() {
     echo -e "${C_RESET}"
     info "UI language: $UI_LANG"
 
+    reload_governance_state
     interactive_mode_menu
     select_hardening_profile
     apply_profile_defaults
     detect_host_runtime_context
+    if ! $ASSESS_ONLY && ! $DRY_RUN; then
+        ensure_governance_files
+        reload_governance_state
+    fi
 
     $ROLLBACK_MODE && { run_full_rollback; exit $?; }
     $SELECTIVE_REMOVE_MODE && { run_selective_removal "$REMOVE_TARGETS_RAW"; exit $?; }
