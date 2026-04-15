@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.4** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.5** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
 Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur nach, wenn Probleme gefunden werden.
 
@@ -13,7 +13,8 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - Drop-in-Konfiguration via `/etc/ssh/sshd_config.d/` (modern, nicht-destruktiv)
 - Erkennt Keyboard-Interactive/2FA `AuthenticationMethods` und deaktiviert keine erforderlichen Methoden
 - `PermitRootLogin` wird in verwalteten Drop-ins auf `prohibit-password` normalisiert
-- **SSH-Krypto-Richtlinienmodus** (`off` | `modern` | `fips-compatible`) mit Validierung und Rollback bei Fehlschlag
+- **SSH-Krypto-Richtlinienmodus** (`off` | `modern` | `fips-compatible` | `strict`) mit Validierung und Rollback bei Fehlschlag
+  - **Neu in v3.0.5:** `strict`-Modus für explizites Pinning von Ciphers/MACs/KEX
 
 ### Google 2FA (Zwei-Faktor-Authentifizierung)
 - Installiert und konfiguriert `libpam-google-authenticator`
@@ -50,12 +51,13 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - **Automatisches Audit** von `SystemMaxUse` gegen konfigurierten Zielwert (Standard: 1G)
 - Fragt nur nach, wenn der Wert von der Empfehlung abweicht
 
-### Login-Umask-Härtung *(neu in v3.0.4)*
-- Dienst-sichere Härtung ausschließlich für interaktive Benutzer
-- Konfiguriert `umask 027` in `/etc/login.defs` und `/etc/profile.d/`
-- Assessment prüft Login-Umask-Einstellungen gegen Baseline
+### Login-Umask-Härtung *(erweitert in v3.0.5)*
+- **Systemweite Baseline-Härtung** via `/etc/login.defs`, `/etc/profile.d/` und **systemd Drop-ins** für System- und Benutzerdienste
+- Konfiguriert `umask 027` auf allen drei Ebenen für vollständige Abdeckung
+- Assessment validiert systemweite Umask-Abdeckung einschließlich systemd Drop-in-Präsenz
+- Rollback stellt alle Umask Drop-ins inklusive systemd-Ziele vollständig wieder her
 
-### SUID/SGID-Inventarisierung & Auditierung *(neu in v3.0.4)*
+### SUID/SGID-Inventarisierung & Auditierung
 - Erstellt beim ersten Lauf eine Baseline aller SUID/SGID-Binaries
 - Tägliche Audit-only-Berichterstattung via Cron — keine automatischen Entfernungen
 - Schreibt Inventar nach `/var/lib/security-script/suid_sgid_baseline.txt`
@@ -131,6 +133,7 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - Entfernt alle vom Skript hinzugefügten Dateien
 - Stellt entfernte Cron-Jobs wieder her
 - Läuft nicht-interaktiv und vollautomatisch
+- **Neu in v3.0.5:** Stellt SSH-Strict-Krypto-Richtlinie und systemweite Umask Drop-ins vollständig wieder her
 
 ### Selektive Entfernung
 - Interaktives Erkennungs- und Auswahlmenü für installierte Komponenten
@@ -156,7 +159,7 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 
 ### Dry-Run-Modus
 - Vorschau aller Änderungen ohne Systemmodifikation
-- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run`
+- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run`
 
 ---
 
@@ -193,8 +196,8 @@ Dies gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AI
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_3.sh
-sudo ./Linux-Server-Security-Script_v3_0_3.sh
+chmod +x Linux-Server-Security-Script_v3_0_5.sh
+sudo ./Linux-Server-Security-Script_v3_0_5.sh
 ```
 
 ### Startmenü
@@ -215,19 +218,19 @@ Beim Start wird einer von sieben Modi gewählt (verfügbar auf **Deutsch und Eng
 
 ```bash
 # Vorschau ohne Änderungen
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --dry-run
 
 # Nur Assessment (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --assess
 
 # Vollständiger Rollback
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --rollback
 
 # Selektive Entfernung
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --remove fail2ban,clamav
 
 # Verifizierung nach Härtung (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_5.sh --verify
 ```
 
 ### Voraussetzungen
@@ -245,7 +248,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 | Idempotent (sicher bei Mehrfachausführung) | ✅ Ja | 🔶 Teilweise | ✅ Ja | ✅ Ja |
 | Audit-First-Muster | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | SSH-Härtung | ✅ Ja | ✅ Ja | ✅ Ja | ✅ Ja |
-| SSH-Krypto-Richtlinie | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
+| SSH-Krypto-Richtlinie (inkl. Strict-Modus) | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
 | Google 2FA-Integration | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Sysctl-Härtung | ✅ Ja (`/etc/sysctl.d/`) | 🔶 Minimal | 🔶 Teilweise | ✅ Ja |
 | Sudoers TTY-Tickets | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
@@ -261,7 +264,7 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 | Dateisystem-Härtung | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
 | Kernel-Modul-Blacklist | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
 | Core-Dump-Beschränkungen | ✅ Ja | ❌ Nein | ✅ Ja | 🔶 Teilweise |
-| Login-Umask-Härtung | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
+| Login-Umask-Härtung (systemweit) | ✅ Ja | ❌ Nein | 🔶 Teilweise | 🔶 Teilweise |
 | SUID/SGID-Inventarisierung & Audit | ✅ Ja | ❌ Nein | ❌ Nein | ❌ Nein |
 | Login-Banner | ✅ Ja | ❌ Nein | ✅ Ja | ✅ Ja |
 | Konfigurations-Backups & Wiederherstellung | ✅ Ja | ❌ Nein | ❌ Nein | 🔶 Teilweise |
@@ -274,19 +277,37 @@ sudo ./Linux-Server-Security-Script_v3_0_3.sh --verify
 
 ---
 
-## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.4
+## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.5
 
-- **Empfohlener Modus erweitert** — bietet aktiv Baseline-Fixes für echte ROTE Befunde an, z.B. auditd, AIDE, Login-Umask, SUID/SGID-Baseline und SSH-Krypto-Richtlinie
-- **SSH-Krypto-Richtlinie** — neuer Modus (`off` | `modern` | `fips-compatible`) mit Konfigurationsvalidierung und automatischem Rollback bei Fehlschlag; Assessment unterscheidet zwischen fehlender expliziter Richtlinie und tatsächlich schwachen Algorithmen; empfohlener Modus verwendet standardmäßig `modern`
-- **Login-Umask-Härtung** — dienst-sichere Härtung ausschließlich für interaktive Benutzer via `/etc/login.defs` und `/etc/profile.d/`; Assessment prüft gleichwertige Shell-Hook-Speicherorte
-- **SUID/SGID-Inventarisierung** — Baseline-Generierung beim ersten Lauf; tägliche Audit-only-Cron-Berichterstattung; TMP_FILE-Expansion-Bug und leeres Cron-Target-Skript behoben
-- **auditd-Regelsatz erweitert** — STIG-Stil-Abdeckung für Sitzungsdateien, Zeitänderungen, Berechtigungsänderungen, Hostnameänderungen, Shell-/Profil-Härtungsdateien, rsyslog, modprobe und GRUB
-- **Assessment erweitert** — prüft jetzt SSH-Krypto-Richtlinie, Login-Umask, SUID/SGID-Baseline-Abdeckung und erweiterte auditd-Abdeckung
-- **Idempotenz-Nachweis** — plant jetzt nur noch für tatsächlich im Lauf ausgeführte Bereiche; im Schritt-für-Schritt-Modus für übersprungene Bereiche deaktiviert
-- **Assessment-Logik gehärtet** — Sudoers-TTY-Regex korrigiert, auditd-Abhängigkeitsbehandlung verbessert, AppArmor-Aktivprozess-Erkennung korrigiert
-- **SSH-Krypto-Prompt** — akzeptiert Enter/j/ja als empfohlenen Standard und n/nein als Ablehnung
-- **Container-/Workload-Sicherheit** — alle neuen Funktionen sind dienst-bewusst und vermeiden breite Änderungen, die Nextcloud, AdGuard Home, Caddy, Docker oder Podman beeinträchtigen könnten
-- **Übernommen aus v3.0.3**: Sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
+- **SSH-Krypto-Strict-Modus** — neuer `strict`-Richtlinienmodus für explizites Pinning von Ciphers/MACs/KEX; Assessment behandelt fehlendes Strict-Pinning als Befund; Rollback und selektive Entfernung stellen Strict-Krypto-Konfiguration vollständig wieder her
+- **Systemweite Umask-Härtung** — von interaktiv-only auf vollständige systemweite Baseline erweitert via `/etc/login.defs`, `/etc/profile.d/` und systemd Drop-ins (`/etc/systemd/system.conf.d/` + `/etc/systemd/user.conf.d/`); Assessment validiert alle drei Ebenen; Rollback stellt alle Umask Drop-ins vollständig wieder her
+- **Assessment erweitert** — validiert jetzt systemweite Umask-Abdeckung einschließlich systemd Drop-in-Präsenz und prüft auf explizites SSH-Strict-Krypto-Pinning
+- **Übernommen aus v3.0.4**: Baseline-Fixes im empfohlenen Modus, SUID/SGID-Inventarisierung, erweiterter auditd-Regelsatz, sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
+
+---
+
+## 📋 Changelog
+
+### v3.0.5
+- **NEU:** `strict`-SSH-Krypto-Richtlinienmodus mit explizitem Ciphers/MACs/KEX-Pinning
+- **VERBESSERT:** Umask-Härtung von interaktiv-only auf vollständige systemweite Baseline erweitert (login.defs + Shell-Hook + systemd Drop-ins)
+- **VERBESSERT:** Assessment behandelt fehlendes SSH-Strict-Krypto-Pinning als Befund und validiert systemweite Umask-Abdeckung
+- **VERBESSERT:** Rollback und selektive Entfernung stellen SSH-Strict-Krypto-Richtlinie und systemweite Umask Drop-ins vollständig wieder her
+
+### v3.0.4
+- **VERBESSERT:** Empfohlener Modus bietet aktiv Baseline-Fixes für ROTE Befunde an (auditd, AIDE, Login-Umask, SUID/SGID-Baseline, SSH-Krypto-Richtlinie)
+- **NEU:** SSH-Krypto-Richtlinienmodus (`off` | `modern` | `fips-compatible`) mit Konfigurationsvalidierung und Rollback
+- **NEU:** Login-Umask-Härtung via `/etc/login.defs` und `/etc/profile.d/`
+- **NEU:** SUID/SGID-Inventarisierungs-Baseline + tägliche Audit-only-Cron-Berichterstattung
+- **VERBESSERT:** auditd-Regelsatz mit STIG-Stil-Abdeckung erweitert
+- **BEHOBEN:** SUID/SGID-Inventarisierungs-Skriptgenerierung (TMP_FILE-Expansion-Bug; leeres Cron-Target-Skript)
+- **BEHOBEN:** SSH-Effektivkonfig-Fallback liest jetzt auch `sshd_config.d` Drop-ins, wenn `sshd -T` nicht nutzbar ist
+- **BEHOBEN:** Verhindert das Schreiben leerer SSH-Direktiven in das Härtungs-Drop-in
+- **BEHOBEN:** Sichere Fallback-Standardwerte für `ClientAliveInterval`, `ClientAliveCountMax` und `PrintLastLog`
+- **VERBESSERT:** SSH-Krypto-Prompt akzeptiert Enter/j/ja als empfohlenen Standard und n/nein als Ablehnung
+- **VERBESSERT:** Idempotenz-Nachweis plant nur noch für tatsächlich im Lauf ausgeführte Bereiche
+- **VERBESSERT:** Empfohlener Modus verwendet standardmäßig `modern` als SSH-Krypto-Richtlinie
+- **BEHOBEN:** Assessment-Logik gehärtet (Sudoers-TTY-Regex, auditd-Abhängigkeitsbehandlung, AppArmor-Aktivprozess-Erkennung)
 
 ---
 
