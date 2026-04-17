@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.6** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+**Version 3.0.7** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
 
 Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
 
@@ -123,6 +123,8 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 - **Stable check IDs** and a centralized severity model for every hardening check
 - **Script-managed compliance catalog** with CIS/BSI/STIG mapping fields
 - Machine-readable compliance report written to `/var/log/security-script/compliance_report.tsv`
+- **On-demand report generation** from log menu option 11 — works even without a prior hardening run *(improved in v3.0.7)*
+- **Optional mail delivery** of the compliance report via existing MSMTP configuration *(new in v3.0.7)*
 - **Exception system** with per-check modes: `disable`, `warn`, `assessment-only`
 - Governance files menu helpers to view and edit the catalog and exception definitions
 
@@ -167,11 +169,11 @@ Automates numerous manual configuration steps with an **audit-first approach**: 
 | 8 | auditd raw log |
 | 9 | Script change log |
 | 10 | Transaction log |
-| 11 | Compliance catalog & exception definitions |
+| 11 | Compliance catalog, on-demand report & mail delivery |
 
 ### Dry-Run Mode
 - Preview all changes without modifying the system
-- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run`
+- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run`
 
 ---
 
@@ -208,8 +210,8 @@ This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, A
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_6.sh
-sudo ./Linux-Server-Security-Script_v3_0_6.sh
+chmod +x Linux-Server-Security-Script_v3_0_7.sh
+sudo ./Linux-Server-Security-Script_v3_0_7.sh
 ```
 
 ### Startup Menu
@@ -230,19 +232,19 @@ On launch, you choose one of seven modes (available in **German and English**):
 
 ```bash
 # Preview without changes
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run
 
 # Assessment only (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --assess
 
 # Full rollback
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --rollback
 
 # Selective removal
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --remove fail2ban,clamav
 
 # Verify after hardening (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --verify
 ```
 
 ### Requirements
@@ -292,18 +294,28 @@ sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.6
+## 🔒 Security & Quality Improvements in v3.0.7
 
-- **Stable check IDs & severity model** — every hardening check now has a stable ID and severity classification; enables consistent tracking across runs and environments
-- **Compliance catalog** — script-managed catalog with CIS/BSI/STIG mapping fields; machine-readable compliance report written to `/var/log/security-script/compliance_report.tsv`
-- **Exception system** — per-check exception modes (`disable`, `warn`, `assessment-only`) allow fine-grained control without modifying the script itself
-- **Governance files menu** — new log menu helpers (option 11) to view and edit the compliance catalog and exception definitions directly from the interactive menu
-- **Rollback action report** — detailed post-rollback report listing reverted items, failures, manual review points, and expected RED findings; written to `/var/log/security-script/rollback_report.log`
-- **RETAINED from v3.0.5**: SSH strict crypto mode, system-wide umask hardening via systemd drop-ins, safe PAM handling, full rollback support, transaction logging, AIDE/AppArmor/container logic, SSH validation, built-in log viewer, and interactive/automatic modes
+- **Compliance report on demand** — log menu option 11 now generates a fresh compliance report directly from the live system state, even without a prior hardening or verify run
+- **Mail delivery for compliance reports** — the compliance report can now be sent via the existing MSMTP configuration directly from the log menu
+- **Prompt & UX fixes** — all interactive prompts in the compliance report and MSMTP workflow now appear immediately without requiring an extra Enter; prompts write directly to `/dev/tty` where needed
+- **MSMTP config handling fixed** — the `/etc/msmtprc` copy confirmation stays visible when the system-wide config is missing; the runtime config path is no longer corrupted after an interactive confirmation
+- **PDF report workflow hardened** — protected PDF verification now succeeds reliably with the entered password; `qpdf` compatibility improved for older releases; `qpdf` can be installed on demand from within the workflow
+- **RETAINED from v3.0.6**: Stable check IDs, compliance catalog, exception system, rollback action report, governance files menu, and all previous hardening features
 
 ---
 
 ## 📋 Changelog
+
+### v3.0.7
+- **NEW:** Log menu option 11 generates a fresh compliance report from live system state on demand
+- **NEW:** Optional mail delivery for the compliance report via existing MSMTP configuration
+- **IMPROVED:** Compliance report workflow works even without a prior hardening/verify run
+- **FIXED:** Protected PDF verification now succeeds reliably with the entered password
+- **FIXED:** Compliance report mail workflow compatible with older `qpdf` releases; `qpdf` can be installed on demand
+- **FIXED:** Raw TSV prompt displayed immediately without requiring an extra Enter
+- **FIXED:** `/etc/msmtprc` copy confirmation stays visible when system-wide msmtp config is missing
+- **FIXED:** msmtp config lookup no longer corrupts the runtime config path after an interactive confirmation
 
 ### v3.0.6
 - **NEW:** Stable check IDs and centralized severity model for all hardening checks
