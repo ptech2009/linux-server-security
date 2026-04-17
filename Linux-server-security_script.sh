@@ -2,28 +2,21 @@
 
 # ============================================================================
 # Linux Server Security Script
-# Version: 3.0.6
+# Version: 3.0.7
 # Author: Paul Schumacher
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
 #
-# Changelog v3.0.6:
-# - FIXED v3.0.6: Protected PDF verification no longer fails because qpdf tried to decrypt into an already-existing mktemp file
-# - IMPROVED v3.0.6: Verification now removes the temp output path before qpdf decrypts and logs verification stderr on failure
-# - NEW v3.0.6: PDF encryption now uses qpdf's legacy-compatible positional syntax via @argfile and verifies the password by decrypting to a temp file
-# - FIXED v3.0.6: Compliance report mail workflow is compatible with older qpdf releases that do not support flag-based --encrypt password options
-# - NEW v3.0.6: PDF password verification now tolerates qpdf warning exit codes and uses --warning-exit-0 for encrypted report self-tests
-# - NEW v3.0.6: PDF password handling hardened to preserve exact input, verify the encrypted output, and use a distinct random owner password
-# - FIXED v3.0.6: Protected compliance PDFs are now validated with the entered password before they can be mailed
-# - NEW v3.0.6: Optional mail delivery now sends a password-protected PDF attachment with mandatory minimum 8-character password
-# - NEW v3.0.6: Missing PDF/encryption mail dependencies can now be installed on demand from the report workflow
-# - IMPROVED v3.0.6: Report workflow now summarizes generated artifacts and offers raw TSV viewing only on request
+# Changelog v3.0.7:
+# - NEW v3.0.7: Log menu option 11 now generates a fresh compliance report from the live system state on demand
+# - NEW v3.0.7: Optional mail delivery for the compliance report via existing MSMTP configuration
+# - IMPROVED v3.0.7: Compliance report workflow now works even if no prior hardening/verify run created the report file
+# - FIXED v3.0.7: Protected PDF verification now succeeds reliably with the entered password
+# - FIXED v3.0.7: Compliance report mail workflow is compatible with older qpdf releases and can install qpdf on demand
+# - FIXED v3.0.7: Raw TSV prompt is displayed immediately and no longer requires an extra Enter to continue
+# - FIXED v3.0.7: Interactive /etc/msmtprc copy confirmation remains visible when the system-wide msmtp config is missing
+# - FIXED v3.0.7: msmtp config lookup no longer corrupts the runtime config path after an interactive copy confirmation
 #
-# Changelog v3.0.6:
-# - NEW v3.0.6: Log menu option 11 now generates a fresh compliance report from the live system state on demand
-# - NEW v3.0.6: Optional mail delivery for the compliance report via existing MSMTP configuration
-# - IMPROVED v3.0.6: Compliance report workflow now works even if no prior hardening/verify run created the report file
-
 # Changelog v3.0.6:
 # - NEW v3.0.6: Added stable check IDs, severity model and centralized check metadata
 # - NEW v3.0.6: Added script-managed compliance catalog + compliance report (CIS/BSI/STIG mapping fields)
@@ -71,7 +64,7 @@ set -uo pipefail
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-readonly SCRIPT_VERSION="3.0.6"
+readonly SCRIPT_VERSION="3.0.7"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
@@ -413,22 +406,12 @@ show_generated_text() {
 }
 
 open_embedded_script_editor() {
-    local title="$1" focus_hint="$2" jump_to_hint="${3:-false}" editor script_path editor_base focus_line="" launch_ok=false
+    local title="$1" focus_hint="$2" editor script_path
     echo
     echo -e "${C_BOLD}${title}${C_RESET}"
     script_path="$(resolve_current_script_path)"
     echo "Path: $script_path"
-    if [[ -n "$focus_hint" ]]; then
-        echo "Hint: search for $focus_hint"
-        focus_line=$(grep -n -m1 -F "$focus_hint" "$script_path" 2>/dev/null | cut -d: -f1 || true)
-        if [[ -n "$focus_line" && "$jump_to_hint" == "true" ]]; then
-            if [[ "$UI_LANG" == "de" ]]; then
-                echo "Springe möglichst direkt zu Zeile: $focus_line"
-            else
-                echo "Will try to jump directly to line: $focus_line"
-            fi
-        fi
-    fi
+    [[ -n "$focus_hint" ]] && echo "Hint: search for $focus_hint"
     editor="$(preferred_editor 2>/dev/null || true)"
     if [[ -z "$editor" ]]; then
         warn "No editor found (EDITOR/nano/vim/vi)."
@@ -440,24 +423,7 @@ open_embedded_script_editor() {
         read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty
         return 1
     fi
-
-    editor_base="$(basename -- "$editor")"
-    if [[ "$jump_to_hint" == "true" && -n "$focus_line" ]]; then
-        case "$editor_base" in
-            nano|pico)
-                "$editor" "+${focus_line}" "$script_path" && launch_ok=true
-                ;;
-            vim|vi|nvim|view|vim.basic)
-                "$editor" "+${focus_line}" "$script_path" && launch_ok=true
-                ;;
-            less)
-                "$editor" "+${focus_line}g" "$script_path" && launch_ok=true
-                ;;
-        esac
-    fi
-    if ! $launch_ok; then
-        "$editor" "$script_path"
-    fi
+    "$editor" "$script_path"
     reload_governance_state
     return 0
 }
@@ -1581,22 +1547,33 @@ interactive_mode_menu() {
 
 # ============================================================================
 ask_yes_no() {
-    local question="$1" default="${2:-}" answer
+    local question="$1" default="${2:-}" answer prompt invalid_msg
     if $AUTO_MODE; then
         [[ "$default" == "n" ]] && { debug "AUTO: '$question' → NO"; return 1; }
         debug "AUTO: '$question' → YES"; return 0
     fi
+    if [[ "$UI_LANG" == "de" ]]; then
+        invalid_msg="Bitte 'y' oder 'n' eingeben."
+    else
+        invalid_msg="Please enter 'y' or 'n'."
+    fi
     while true; do
         if [[ "$default" == "y" ]]; then
-            echo -en "$question [Y/n]: "; read -r answer </dev/tty; answer=${answer:-y}
+            prompt="$question [Y/n]: "
         elif [[ "$default" == "n" ]]; then
-            echo -en "$question [y/N]: "; read -r answer </dev/tty; answer=${answer:-n}
+            prompt="$question [y/N]: "
         else
-            echo -en "$question [y/n]: "; read -r answer </dev/tty
+            prompt="$question [y/n]: "
         fi
+        printf '%s' "$prompt" >/dev/tty
+        read -r answer </dev/tty
+        [[ "$default" == "y" && -z "$answer" ]] && answer=y
+        [[ "$default" == "n" && -z "$answer" ]] && answer=n
         case "$answer" in
-            [Yy]*) return 0 ;; [Nn]*) return 1 ;;
-            *) warn "Bitte 'y' oder 'n' eingeben." ;;
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) printf '%s
+' "$invalid_msg" >/dev/tty ;;
         esac
     done
 }
@@ -1678,9 +1655,61 @@ show_apt_update_failure_hint() {
     fi
 }
 
+repair_apt_state() {
+    info "Attempting APT repair ..."
+    if $DRY_RUN; then
+        dry_run_echo "rm -rf /var/lib/apt/lists/*"
+        dry_run_echo "apt-get clean"
+        dry_run_echo "apt-get update"
+        dry_run_echo "apt-get update --fix-missing"
+        return 0
+    fi
+
+    rm -rf /var/lib/apt/lists/* || true
+    apt-get clean || true
+
+    local apt_log
+    apt_log=$(mktemp_tracked)
+
+    if apt-get update >"$apt_log" 2>&1; then
+        cat "$apt_log" 2>/dev/null || true
+        log_change "APT_REPAIR_UPDATE"
+        SCRIPT_APT_UPDATED=true
+        SCRIPT_APT_FAILED=false
+        success "APT repair succeeded."
+        return 0
+    fi
+
+    cat "$apt_log" >&2
+    show_apt_update_failure_hint "$apt_log"
+    warn "Standard APT repair did not fully succeed. Trying --fix-missing ..."
+
+    : > "$apt_log"
+    if apt-get update --fix-missing >"$apt_log" 2>&1; then
+        cat "$apt_log" 2>/dev/null || true
+        log_change "APT_REPAIR_UPDATE_FIX_MISSING"
+        SCRIPT_APT_UPDATED=true
+        SCRIPT_APT_FAILED=false
+        success "APT repair succeeded with --fix-missing."
+        return 0
+    fi
+
+    cat "$apt_log" >&2
+    show_apt_update_failure_hint "$apt_log"
+    SCRIPT_APT_FAILED=true
+    error "APT repair failed."
+    return 1
+}
+
 ensure_apt_updated() {
     $SCRIPT_APT_UPDATED && return 0
-    $SCRIPT_APT_FAILED && { error "'apt update' previously failed in this run. Fix the root cause before retrying."; return 1; }
+
+    if $SCRIPT_APT_FAILED; then
+        warn "'apt update' previously failed in this run. Attempting automated repair ..."
+        repair_apt_state || return 1
+        return 0
+    fi
+
     info "Running 'apt update'..."
     if $DRY_RUN; then
         dry_run_echo "apt-get update -qq"
@@ -1700,8 +1729,9 @@ ensure_apt_updated() {
     SCRIPT_APT_FAILED=true
     cat "$apt_log" >&2
     show_apt_update_failure_hint "$apt_log"
-    error "'apt update' failed."
-    return $rc
+    warn "'apt update' failed. Attempting automated repair ..."
+    repair_apt_state || return $rc
+    return 0
 }
 
 ensure_packages_installed() {
@@ -2980,22 +3010,77 @@ resolve_user_home_dir() {
     getent passwd "$user_name" 2>/dev/null | awk -F: '{print $6}' | head -n 1
 }
 
-find_msmtp_config_file() {
+ensure_system_msmtp_config() {
     local candidate user_home
+    [[ -r /etc/msmtprc ]] && { printf '%s\n' '/etc/msmtprc'; return 0; }
+
     if [[ -n "${SUDO_USER:-}" ]]; then
         user_home=$(resolve_user_home_dir "$SUDO_USER" || true)
         candidate="${user_home}/.msmtprc"
-        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+        if [[ -r "$candidate" ]]; then
+            if ask_yes_no "$( [[ "$UI_LANG" == "de" ]] && echo "/etc/msmtprc fehlt. Soll $candidate nach /etc/msmtprc kopiert und auf root:root / 600 gesetzt werden?" || echo "/etc/msmtprc is missing. Copy $candidate to /etc/msmtprc and set root:root / 600?" )" "y"; then
+                if $DRY_RUN; then
+                    dry_run_echo "cp '$candidate' '/etc/msmtprc' && chown root:root '/etc/msmtprc' && chmod 600 '/etc/msmtprc'"
+                    printf '%s\n' '/etc/msmtprc'
+                    return 0
+                fi
+                if cp "$candidate" /etc/msmtprc && chown root:root /etc/msmtprc && chmod 600 /etc/msmtprc; then
+                    log_change "MSMTP_CONFIG_INSTALLED:/etc/msmtprc"
+                    txlog "FILE_ADDED" "/etc/msmtprc"
+                    success "$( [[ "$UI_LANG" == "de" ]] && echo "Systemweite msmtp-Konfiguration erstellt: /etc/msmtprc" || echo "System-wide msmtp config created: /etc/msmtprc" )"
+                    printf '%s\n' '/etc/msmtprc'
+                    return 0
+                fi
+                warn "$( [[ "$UI_LANG" == "de" ]] && echo "Konnte /etc/msmtprc nicht erstellen." || echo "Could not create /etc/msmtprc." )"
+            fi
+        fi
     fi
+    return 1
+}
+
+find_msmtp_config_file() {
+    local candidate
+    [[ -r /etc/msmtprc ]] && { printf '%s\n' '/etc/msmtprc'; return 0; }
+
+    if [[ -t 0 && -e /dev/tty ]]; then
+        ensure_system_msmtp_config >/dev/tty || true
+    else
+        ensure_system_msmtp_config >/dev/null 2>&1 || true
+    fi
+
+    [[ -r /etc/msmtprc ]] && { printf '%s\n' '/etc/msmtprc'; return 0; }
     candidate="${HOME:-/root}/.msmtprc"
-    [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
-    [[ -f /root/.msmtprc ]] && { printf '%s\n' '/root/.msmtprc'; return 0; }
+    [[ -r "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    [[ -r /root/.msmtprc ]] && { printf '%s\n' '/root/.msmtprc'; return 0; }
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local user_home
+        user_home=$(resolve_user_home_dir "$SUDO_USER" || true)
+        candidate="${user_home}/.msmtprc"
+        [[ -r "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    fi
     return 1
 }
 
 extract_msmtp_from_address() {
     local config_file="$1"
     awk '/^[[:space:]]*from[[:space:]]+/ {print $2; exit}' "$config_file" 2>/dev/null
+}
+
+prepare_msmtp_runtime_config() {
+    local source_config="$1" runtime_config
+    [[ -f "$source_config" ]] || return 1
+    ensure_governance_directories
+    runtime_config=$(mktemp_tracked)
+    awk '
+        BEGIN { logfile_set=0 }
+        /^[[:space:]]*logfile[[:space:]]+/ { next }
+        { print }
+        END {
+            print "logfile " ENVIRON["MSMTP_LOGFILE"]
+        }
+    ' "$source_config" > "$runtime_config" || return 1
+    chmod 600 "$runtime_config" 2>/dev/null || true
+    printf '%s\n' "$runtime_config"
 }
 
 have_python_reportlab() {
@@ -3254,7 +3339,8 @@ encrypt_pdf_with_password() {
 
 send_attachment_via_msmtp() {
     local attachment="$1" recipient="$2" subject="$3" body_text="$4"
-    local msmtp_config from_addr host_name boundary filename
+    local msmtp_config runtime_config from_addr host_name boundary filename
+    local msmtp_logfile="/var/log/security-script/msmtp.log"
 
     [[ -f "$attachment" ]] || { warn "Attachment not found: $attachment"; return 1; }
     command -v msmtp >/dev/null 2>&1 || {
@@ -3265,7 +3351,10 @@ send_attachment_via_msmtp() {
         fi
         ensure_packages_installed msmtp msmtp-mta || return 1
     }
-    msmtp_config=$(find_msmtp_config_file) || { warn "No usable .msmtprc found for root or the invoking user."; return 1; }
+    msmtp_config=$(find_msmtp_config_file) || { warn "No usable msmtp config found (/etc/msmtprc or ~/.msmtprc)."; return 1; }
+    MSMTP_LOGFILE="$msmtp_logfile" runtime_config=$(prepare_msmtp_runtime_config "$msmtp_config") || { warn "Could not prepare a runtime msmtp config."; return 1; }
+    info "Using msmtp config: $msmtp_config"
+    info "msmtp logfile: $msmtp_logfile"
     from_addr=$(extract_msmtp_from_address "$msmtp_config")
     host_name=$(hostname -f 2>/dev/null || hostname)
     [[ -n "$from_addr" ]] || from_addr="root@${host_name}"
@@ -3310,7 +3399,7 @@ send_attachment_via_msmtp() {
         printf '
 --%s--
 ' "$boundary"
-    } | msmtp --file="$msmtp_config" -t
+    } | msmtp --file="$runtime_config" -t
 }
 
 generate_compliance_report_from_live_state() {
@@ -3366,10 +3455,14 @@ handle_compliance_report_menu() {
     fi
 
     echo
-    if [[ "$UI_LANG" == "de" ]]; then
-        read -rp "E-Mail-Adresse für Versand eingeben (Enter = kein Versand): " recipient </dev/tty
+    if ! $pdf_generated; then
+        warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Kein PDF-Report verfügbar. Versanddialog wird übersprungen.' || echo 'No PDF report is available. The mail delivery dialog is skipped.' )"
     else
-        read -rp "Enter recipient email address to send the report (Enter = no mail delivery): " recipient </dev/tty
+        if [[ "$UI_LANG" == "de" ]]; then
+            read -rp "E-Mail-Adresse für Versand eingeben (Enter = kein Versand): " recipient </dev/tty
+        else
+            read -rp "Enter recipient email address to send the report (Enter = no mail delivery): " recipient </dev/tty
+        fi
     fi
 
     if [[ -n "$recipient" ]]; then
@@ -3418,13 +3511,18 @@ The attached PDF is password-protected. Share the password via a separate commun
     $protected_pdf_generated && echo "  - PDF (protected): $COMPLIANCE_REPORT_PDF_PROTECTED"
 
     if [[ "$UI_LANG" == "de" ]]; then
-        read -rp "Rohdaten-TSV jetzt anzeigen? [y/N]: " answer </dev/tty
+        printf '%s' "Rohdaten-TSV jetzt anzeigen? [y/N]: " >/dev/tty
     else
-        read -rp "Show raw TSV now? [y/N]: " answer </dev/tty
+        printf '%s' "Show raw TSV now? [y/N]: " >/dev/tty
     fi
+    read -r answer </dev/tty
+
     case "$answer" in
-        y|Y|yes|YES|j|J) show_text_file "Compliance Report (TSV)" "$COMPLIANCE_REPORT" ;;
-        *) read -rp "$( [[ "$UI_LANG" == "de" ]] && echo 'Enter zum Fortfahren' || echo 'Press Enter to continue' )" _ </dev/tty ;;
+        y|Y|yes|YES|j|J)
+            show_text_file "Compliance Report (TSV)" "$COMPLIANCE_REPORT"
+            ;;
+        *)
+            ;;
     esac
 }
 
@@ -3469,8 +3567,8 @@ view_logs_menu() {
             12) show_text_file "Rollback Report" "$ROLLBACK_ACTION_REPORT" ;;
             13) show_generated_text "Embedded Check Catalog" emit_embedded_check_catalog ;;
             14) show_generated_text "Embedded Exceptions" emit_embedded_exceptions_view ;;
-            15) open_embedded_script_editor "Edit This Script (Governance)" "EMBEDDED USER EXCEPTION BLOCK" false ;;
-            16) open_embedded_script_editor "Edit This Script (Exceptions Block)" "EMBEDDED_EXCEPTION_MODE" true ;;
+            15) open_embedded_script_editor "Edit This Script (Governance)" "EMBEDDED USER EXCEPTION BLOCK" ;;
+            16) open_embedded_script_editor "Edit This Script (Exceptions Block)" "EMBEDDED_EXCEPTION_MODE" ;;
             0) return 0 ;;
             *) warn "$( [[ "$UI_LANG" == "de" ]] && echo 'Ungültige Auswahl.' || echo 'Invalid selection.' )" ;;
         esac
