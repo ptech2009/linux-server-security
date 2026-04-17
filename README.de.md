@@ -1,6 +1,6 @@
 # Linux Server Security Script
 
-**Version 3.0.6** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
+**Version 3.0.7** · Interaktives Bash-Skript zur systematischen Absicherung von Debian/Ubuntu-Servern.
 
 Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First-Ansatz**: Das Skript prüft den aktuellen Zustand gegen Best Practices und fragt nur nach, wenn Probleme gefunden werden.
 
@@ -123,6 +123,8 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 - **Stabile Check-IDs** und ein zentrales Schweregrad-Modell für jeden Härtungs-Check
 - **Skript-verwalteter Compliance-Katalog** mit CIS/BSI/STIG-Zuordnungsfeldern
 - Maschinenlesbarer Compliance-Bericht unter `/var/log/security-script/compliance_report.tsv`
+- **On-Demand-Berichtsgenerierung** aus Log-Menü Option 11 — funktioniert auch ohne vorherigen Härtungslauf *(verbessert in v3.0.7)*
+- **Optionaler E-Mail-Versand** des Compliance-Berichts via bestehender MSMTP-Konfiguration *(neu in v3.0.7)*
 - **Exception-System** mit check-spezifischen Modi: `disable`, `warn`, `assessment-only`
 - Governance-Dateien-Menü zum Anzeigen und Bearbeiten von Katalog und Exception-Definitionen
 
@@ -167,11 +169,11 @@ Automatisiert zahlreiche manuelle Konfigurationsschritte mit einem **Audit-First
 | 8 | auditd-Rohlog |
 | 9 | Skript-Änderungslog |
 | 10 | Transaktionslog |
-| 11 | Compliance-Katalog & Exception-Definitionen |
+| 11 | Compliance-Katalog, On-Demand-Bericht & E-Mail-Versand |
 
 ### Dry-Run-Modus
 - Vorschau aller Änderungen ohne Systemmodifikation
-- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run`
+- Aktivierung via: `sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run`
 
 ---
 
@@ -208,8 +210,8 @@ Dies gilt für: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AI
 ```bash
 git clone https://github.com/ptech2009/linux-server-security.git
 cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_6.sh
-sudo ./Linux-Server-Security-Script_v3_0_6.sh
+chmod +x Linux-Server-Security-Script_v3_0_7.sh
+sudo ./Linux-Server-Security-Script_v3_0_7.sh
 ```
 
 ### Startmenü
@@ -230,19 +232,19 @@ Beim Start wird einer von sieben Modi gewählt (verfügbar auf **Deutsch und Eng
 
 ```bash
 # Vorschau ohne Änderungen
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --dry-run
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run
 
 # Nur Assessment (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --assess
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --assess
 
 # Vollständiger Rollback
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --rollback
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --rollback
 
 # Selektive Entfernung
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --remove fail2ban,clamav
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --remove fail2ban,clamav
 
 # Verifizierung nach Härtung (Exit-Code 2 bei verbleibenden ROTEN Befunden)
-sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
+sudo ./Linux-Server-Security-Script_v3_0_7.sh --verify
 ```
 
 ### Voraussetzungen
@@ -292,18 +294,28 @@ sudo ./Linux-Server-Security-Script_v3_0_6.sh --verify
 
 ---
 
-## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.6
+## 🔒 Sicherheits- & Qualitätsverbesserungen in v3.0.7
 
-- **Stabile Check-IDs & Schweregrad-Modell** — jeder Härtungs-Check hat jetzt eine stabile ID und Schweregrad-Klassifizierung; ermöglicht konsistentes Tracking über Läufe und Umgebungen hinweg
-- **Compliance-Katalog** — skript-verwalteter Katalog mit CIS/BSI/STIG-Zuordnungsfeldern; maschinenlesbarer Compliance-Bericht unter `/var/log/security-script/compliance_report.tsv`
-- **Exception-System** — check-spezifische Exception-Modi (`disable`, `warn`, `assessment-only`) ermöglichen feingranulare Kontrolle ohne Skriptänderungen
-- **Governance-Dateien-Menü** — neue Log-Menü-Helfer (Option 11) zum Anzeigen und Bearbeiten von Compliance-Katalog und Exception-Definitionen direkt aus dem interaktiven Menü
-- **Rollback-Aktionsbericht** — detaillierter Post-Rollback-Bericht mit wiederhergestellten Elementen, Fehlern, manuellen Prüfpunkten und erwarteten ROTEN Befunden; unter `/var/log/security-script/rollback_report.log`
-- **Übernommen aus v3.0.5**: SSH-Strict-Krypto-Modus, systemweite Umask-Härtung via systemd Drop-ins, sichere PAM-Behandlung, vollständige Rollback-Unterstützung, Transaktionsprotokollierung, AIDE-/AppArmor-/Container-Logik, SSH-Validierung, eingebauter Log-Viewer und interaktive/automatische Modi
+- **Compliance-Bericht auf Abruf** — Log-Menü Option 11 generiert jetzt einen aktuellen Compliance-Bericht direkt aus dem Live-Systemzustand, auch ohne vorherigen Härtungs- oder Verify-Lauf
+- **E-Mail-Versand für Compliance-Berichte** — der Compliance-Bericht kann jetzt direkt aus dem Log-Menü via bestehender MSMTP-Konfiguration versendet werden
+- **Prompt- & UX-Fixes** — alle interaktiven Prompts im Compliance-Bericht- und MSMTP-Workflow erscheinen jetzt sofort ohne zusätzliche Enter-Eingabe; Prompts schreiben bei Bedarf direkt nach `/dev/tty`
+- **MSMTP-Konfigurationsbehandlung korrigiert** — die `/etc/msmtprc`-Kopierbestätigung bleibt sichtbar, wenn die systemweite Konfiguration fehlt; der Laufzeit-Konfigurationspfad wird nach einer interaktiven Bestätigung nicht mehr überschrieben
+- **PDF-Bericht-Workflow gehärtet** — die Verifizierung passwortgeschützter PDFs gelingt jetzt zuverlässig mit dem eingegebenen Passwort; `qpdf`-Kompatibilität für ältere Releases verbessert; `qpdf` kann bei Bedarf direkt aus dem Workflow heraus installiert werden
+- **Übernommen aus v3.0.6**: Stabile Check-IDs, Compliance-Katalog, Exception-System, Rollback-Aktionsbericht, Governance-Dateien-Menü und alle vorherigen Härtungsfunktionen
 
 ---
 
 ## 📋 Changelog
+
+### v3.0.7
+- **NEU:** Log-Menü Option 11 generiert on-demand einen aktuellen Compliance-Bericht aus dem Live-Systemzustand
+- **NEU:** Optionaler E-Mail-Versand des Compliance-Berichts via bestehender MSMTP-Konfiguration
+- **VERBESSERT:** Compliance-Bericht-Workflow funktioniert auch ohne vorherigen Härtungs-/Verify-Lauf
+- **BEHOBEN:** Verifizierung passwortgeschützter PDFs gelingt jetzt zuverlässig mit dem eingegebenen Passwort
+- **BEHOBEN:** Compliance-Bericht-Mail-Workflow kompatibel mit älteren `qpdf`-Releases; `qpdf` kann bei Bedarf installiert werden
+- **BEHOBEN:** Raw-TSV-Prompt wird sofort angezeigt ohne zusätzliche Enter-Eingabe
+- **BEHOBEN:** `/etc/msmtprc`-Kopierbestätigung bleibt sichtbar, wenn die systemweite msmtp-Konfiguration fehlt
+- **BEHOBEN:** msmtp-Konfigurationspfad wird nach interaktiver Bestätigung nicht mehr überschrieben
 
 ### v3.0.6
 - **NEU:** Stabile Check-IDs und zentrales Schweregrad-Modell für alle Härtungs-Checks
