@@ -1,356 +1,137 @@
 # Linux Server Security Script
 
-**Version 3.0.7** · Interactive Bash script for systematic hardening of Debian/Ubuntu servers.
+[![Version](https://img.shields.io/badge/version-3.0.8-blue.svg)](https://github.com/ptech2009/linux-server-security)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-orange.svg)]()
 
-Automates numerous manual configuration steps with an **audit-first approach**: the script checks your current state against best practices and only prompts when issues are found.
-
-## 🔐 Features
-
-### SSH Hardening & Key Management
-- Verifies and optimizes `sshd_config` settings (`PasswordAuthentication`, `PermitRootLogin`, `AllowUsers`, `X11Forwarding`, etc.)
-- Ed25519 keypair generation with automatic `authorized_keys` setup
-- Config validation via `sshd -t` before every restart — prints real error output on failure
-- Drop-in config via `/etc/ssh/sshd_config.d/` (modern, non-destructive)
-- Detects keyboard-interactive/2FA `AuthenticationMethods` and avoids disabling required methods
-- `PermitRootLogin` normalized to `prohibit-password` in managed drop-ins
-- **SSH crypto policy mode** (`off` | `modern` | `fips-compatible` | `strict`) with validation and rollback on failure
-
-### Google 2FA (Two-Factor Authentication)
-- Installs and configures `libpam-google-authenticator`
-- Interactive setup with QR code and emergency scratch codes
-- Automatic PAM and SSHD configuration
-
-### Fail2ban (Audit Mode)
-- **Auto-audits** when installed: checks jail.local, [sshd] jail status, ignoreip whitelist, service state
-- Creates minimal `jail.local` (not a copy of the huge `jail.conf`)
-- Config validation via `fail2ban-client -t` before restart, with restore on failure
-- Automatic local subnet whitelisting to prevent self-lockout
-
-### SSHGuard (Audit Mode)
-- **Auto-audits** when installed: checks whitelist completeness, service state
-- IPv4/IPv6 local subnet detection and whitelisting
-
-### UFW Firewall (Audit Mode)
-- **Auto-audits** when installed: checks active state, SSH port rule, uncovered listening ports
-- Detects host ports via `ss` and container ports via Docker/Podman
-- SSH pre-allow before UFW activation to prevent lockout
-- Interactive port-by-port review for uncovered services
-
-### Sysctl Kernel Hardening (Audit Mode)
-- **Auto-audits** 21 kernel/network parameters against best practices
-- Covers: `rp_filter`, `accept_redirects`, `send_redirects`, `accept_source_route`, `log_martians`, `icmp_echo_ignore_broadcasts`, `tcp_syncookies`, `randomize_va_space`, `sysrq`, `protected_hardlinks/symlinks`
-- Writes to `/etc/sysctl.d/99-security-script.conf` (no modification of `/etc/sysctl.conf`)
-
-### Sudoers TTY Ticket Isolation (Audit Mode)
-- **Auto-audits** whether `tty_tickets` is active
-- Ensures sudo credentials are per-terminal, not shared across sessions
-- Validates with `visudo` before applying
-
-### Journald Log Limits (Audit Mode)
-- **Auto-audits** `SystemMaxUse` against configured target (default: 1G)
-- Only prompts if the value differs from the recommendation
-
-### Login Umask Hardening
-- System-wide baseline hardening via `/etc/login.defs`, `/etc/profile.d/`, and systemd drop-ins for system and user services
-- Configures `umask 027` across all three layers for complete coverage
-- Assessment validates system-wide umask coverage including systemd drop-in presence
-- Rollback fully reverts all umask drop-ins including systemd targets
-
-### SUID/SGID Inventory & Auditing
-- Creates a baseline of all SUID/SGID binaries on first run
-- Daily audit-only reporting via cron — no automatic removals
-- Writes inventory to `/var/lib/security-script/suid_sgid_baseline.txt`
-- Reports differences at `/var/log/security-script-suid-sgid-report.log`
-
-### ClamAV Antivirus
-- Installs `clamav` and `clamav-daemon` if missing
-- Runs initial `freshclam` database update
-- Configures automatic virus definition updates
-
-### Unattended Upgrades
-- Configures `unattended-upgrades` for automatic security patches
-- Sets up `Allowed-Origins`, reboot schedule, and email notifications
-- Validates and fixes `20auto-upgrades` periodic configuration
-
-### PAM Hardening
-- Uses `pam-auth-update` (Debian/Ubuntu native mechanism) — **no raw `sed` on live PAM files**
-- `pam_faillock` via `/etc/security/faillock.conf` (modern, safe approach)
-- Password quality enforcement via `/etc/security/pwquality.conf`
-- **Sudo smoke-test after every PAM change** — automatic rollback on failure
-
-### auditd (Audit Framework)
-- Installs and configures `auditd` for detailed system event recording
-- **Expanded STIG-style ruleset** covering session files, time changes, permission changes, hostname changes, shell/profile hardening files, rsyslog, modprobe, and GRUB
-- Writes rules to `/etc/audit/rules.d/99-security-script.rules`
-- Prints relevant log locations and commands after setup
-
-### AIDE (File Integrity Monitoring)
-- Builds an integrity baseline of important system files
-- Local excludes for volatile container/log paths to reduce noise on live hosts
-- Automatic daily check via cron (`/etc/cron.daily/aide-check`)
-- Robust DB discovery with `nice`/`ionice` support and non-interactive init with timeout
-- Prefers autogenerated config; cron can refresh fallback config without `update-aide.conf`
-
-### AppArmor Enforcement
-- Switches all loaded AppArmor profiles from complain to enforce mode
-- Correctly detects partially unloaded/teardown states — no false GREEN findings
-- Skipped by default on Docker/Podman hosts unless explicitly forced
-- Audits and reports profiles that cannot be enforced cleanly
-
-### Filesystem Hardening
-- Applies secure mount options (`noexec`, `nosuid`, `nodev`) to temporary filesystems
-- Reduces the risk of malicious code execution from common staging locations
-
-### Kernel Module Blacklisting
-- Blacklists unused or dangerous kernel modules
-- Writes to `/etc/modprobe.d/security-script-blacklist.conf`
-
-### Core Dump Restrictions
-- Disables core dumps via `/etc/security/limits.d/` and `sysctl`
-- Prevents sensitive process memory from being written to disk uncontrolled
-
-### Login Banners
-- Configures SSH pre-login banner (`/etc/issue.net`) with legal/organizational notice
-- Clears `/etc/motd` to avoid information leakage
-
-### MSMTP Email Notifications
-- Interactive SMTP setup wizard (user-based or system-wide)
-- Supports host, port, TLS, credentials, and sender configuration
-- Optional test email sending
-- Security hint for GPG/secret-tool password storage
-
-### Compliance Catalog & Reporting *(new in v3.0.6)*
-- **Stable check IDs** and a centralized severity model for every hardening check
-- **Script-managed compliance catalog** with CIS/BSI/STIG mapping fields
-- Machine-readable compliance report written to `/var/log/security-script/compliance_report.tsv`
-- **On-demand report generation** from log menu option 11 — works even without a prior hardening run *(improved in v3.0.7)*
-- **Optional mail delivery** of the compliance report via existing MSMTP configuration *(new in v3.0.7)*
-- **Exception system** with per-check modes: `disable`, `warn`, `assessment-only`
-- Governance files menu helpers to view and edit the catalog and exception definitions
-
-### Rollback Action Report *(new in v3.0.6)*
-- Detailed report generated after every rollback run
-- Lists reverted items, failures, manual review points, and expected RED findings
-- Written to `/var/log/security-script/rollback_report.log`
-
-### Backup & Restore
-- Pre-change backups for every modified config file
-- `list_backups`: Shows all backups with timestamps
-- `restore_backup_interactive`: Numbered menu for selective restoration
-- Interactive backup management offered at script end
-
-### Full Rollback
-- Restores all backed-up config files from a machine-readable **transaction log**
-- Removes packages installed by this script
-- Unlocks root account if locked by this script
-- Removes all files added by this script
-- Restores removed cron jobs
-- Runs non-interactively and fully automatically
-- Generates a rollback action report with reverted items and manual review points
-
-### Selective Removal
-- Interactive detection + selection menu for installed components
-- `--remove target1,target2` CLI flag for scripted use
-
-### Log Viewer
-- Built-in interactive log menu accessible after hardening
-- Shows a summary of all relevant log file locations after every run
-- Menu entries (0–11):
-
-| # | Entry |
-|---|-------|
-| 1 | Security log summary (all relevant paths at a glance) |
-| 2 | AIDE init log |
-| 3 | AIDE check log |
-| 4 | Latest AIDE daily report |
-| 5 | Fail2ban journal |
-| 6 | Fail2ban status |
-| 7 | auditd journal |
-| 8 | auditd raw log |
-| 9 | Script change log |
-| 10 | Transaction log |
-| 11 | Compliance catalog, on-demand report & mail delivery |
-
-### Dry-Run Mode
-- Preview all changes without modifying the system
-- Activated via: `sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run`
+A comprehensive Bash script for auditing and hardening Debian/Ubuntu servers. CIS/BSI/STIG-oriented baseline with compliance reporting, exception management, and full rollback support.
 
 ---
 
-## 🔄 Audit Pattern
+## Features
 
-Sections with existing installations **skip the "Configure X?" question** and go straight into auditing. The script checks each aspect and reports:
-
-```
-INFO: 5a. Fail2ban — Audit & Configuration
-SUCCESS: Fail2ban is installed.
-INFO: Auditing Fail2ban configuration...
-SUCCESS: jail.local exists.
-SUCCESS: Jail [sshd] is enabled.
-SUCCESS: Local subnets covered by ignoreip.
-SUCCESS: Fail2ban service is active.
-SUCCESS: Fail2ban service is enabled.
-SUCCESS: Fail2ban audit: All checks passed.
-```
-
-When issues are found, the pattern is: **[Issue]** → **Recommendation** → **Fix?**
-
-```
-WARNING: [Issue] Jail [sshd] is not enabled.
-INFO:   Recommendation: Enable [sshd] jail to protect SSH against brute-force.
-  Fix: Enable [sshd] jail? [Y/n]:
-```
-
-This applies to: Fail2ban, SSHGuard, UFW, Journald, Sysctl, Sudoers, AppArmor, AIDE, auditd, Filesystem, PAM, Login Banners, Login Umask, and SSH Crypto Policy.
+- **Automated hardening** for SSH, PAM, sysctl, auditd, AIDE, AppArmor and more
+- **Compliance catalog** with stable check IDs (SSH-001…, SYS-001…) and CIS/BSI/STIG mapping
+- **Severity model** — critical / high / medium / low per check
+- **Exception system** — per-check modes: `disable`, `warn`, `assessment-only`
+- **Governance file menu** — view and edit catalog and exception definitions from the script
+- **Compliance report** — generated on demand or after each run, with optional PDF and mail delivery via msmtp
+- **Assessment matrix** — live system state evaluated against all check IDs including SSH key checks
+- **Full rollback** — revert all changes including SSH crypto policy, umask drop-ins, and auditd rules
+- **Container-aware** — service-aware logic avoids breaking Nextcloud, Docker, AdGuard Home, Caddy
+- **Idempotent** — safe to re-run; only plans sections actually executed in the current run
 
 ---
 
-## 🚀 Installation & Usage
+## Modes
+
+| Mode | Description |
+|------|-------------|
+| `recommended` | Interactive baseline hardening with guided prompts |
+| `automatic` | Non-interactive full hardening, suitable for CI/automation |
+| `assessment` | Audit-only — no changes made, findings reported |
+| `rollback` | Revert all script-managed changes |
+| `selective` | Choose individual hardening sections |
+
+---
+
+## Quick Start
 
 ```bash
-git clone https://github.com/ptech2009/linux-server-security.git
-cd linux-server-security
-chmod +x Linux-Server-Security-Script_v3_0_7.sh
-sudo ./Linux-Server-Security-Script_v3_0_7.sh
+# Download
+wget https://raw.githubusercontent.com/ptech2009/linux-server-security/main/linux-server-security_script_v3_0_8.sh
+
+# Make executable
+chmod +x linux-server-security_script_v3_0_8.sh
+
+# Run assessment (no changes)
+sudo bash linux-server-security_script_v3_0_8.sh --mode assessment
+
+# Run recommended hardening
+sudo bash linux-server-security_script_v3_0_8.sh --mode recommended
 ```
 
-### Startup Menu
+---
 
-On launch, you choose one of seven modes (available in **German and English**):
+## Compliance Coverage
 
-| # | Mode | Description |
-|---|------|-------------|
-| 1 | Assessment only | Audit without changes, exit code 2 on RED findings |
-| 2 | Recommended hardening | Applies best-practice defaults automatically, including baseline fixes for real RED findings |
-| 3 | Step by step | Reviews all areas one by one |
-| 4 | Fully automatic | Reads `security_config.env` |
-| 5 | Full rollback | Restores pre-script state without further prompts |
-| 6 | Selective removal | Detection + interactive selection menu |
-| 7 | Expert mode | Profile selection and special cases |
+| Framework | Coverage |
+|-----------|----------|
+| CIS Benchmark (Debian/Ubuntu) | Baseline controls |
+| BSI IT-Grundschutz | Relevant hardening measures |
+| STIG (DISA) | Extended auditd rules, SSH policy |
 
-### CLI Flags
-
-```bash
-# Preview without changes
-sudo ./Linux-Server-Security-Script_v3_0_7.sh --dry-run
-
-# Assessment only (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_7.sh --assess
-
-# Full rollback
-sudo ./Linux-Server-Security-Script_v3_0_7.sh --rollback
-
-# Selective removal
-sudo ./Linux-Server-Security-Script_v3_0_7.sh --remove fail2ban,clamav
-
-# Verify after hardening (exit code 2 if RED findings remain)
-sudo ./Linux-Server-Security-Script_v3_0_7.sh --verify
-```
-
-### Requirements
-- Debian/Ubuntu (tested on Ubuntu 24.04 LTS, Linux Mint 22)
-- Bash 4+
-- Root privileges
+Each check in the compliance catalog carries a stable ID, severity level, and framework mapping fields. Exceptions can be defined per check ID with a justification and expiry date.
 
 ---
 
-## ✨ Feature Matrix
+## Check ID Reference (SSH)
 
-| Feature | linux-server-security | captainzero93/linux-hardening | dev-sec/linux-baseline | openstack-ansible-security |
-|:--------|:---------------------|:-----------------------------|:-----------------------|:---------------------------|
-| Interactive user guidance | ✅ Yes | 🔶 Partially | ❌ No | ❌ No |
-| Idempotent (safe for repeated runs) | ✅ Yes | 🔶 Partially | ✅ Yes | ✅ Yes |
-| Audit-first pattern | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| SSH hardening | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| SSH crypto policy (incl. strict mode) | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
-| Google 2FA integration | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Sysctl hardening | ✅ Yes (`/etc/sysctl.d/`) | 🔶 Minimal | 🔶 Partially | ✅ Yes |
-| Sudoers TTY tickets | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
-| UFW firewall management | ✅ Yes | 🔶 Partially (iptables) | 🔶 Partially | ✅ Yes |
-| Container port detection | ✅ Yes (Docker + Podman) | ❌ No | ❌ No | ❌ No |
-| Unattended upgrades | ✅ Yes | 🔶 Partially | ❌ No | ✅ Yes |
-| Fail2ban + SSHGuard | ✅ Yes | ✅ Yes | ❌ No | ✅ Yes |
-| ClamAV integration | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| PAM hardening (safe, native) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| auditd / audit rules (STIG-expanded) | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
-| AIDE file integrity | ✅ Yes | ❌ No | ✅ Yes | ❌ No |
-| AppArmor enforcement | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
-| Filesystem hardening | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| Kernel module blacklist | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| Core dump restrictions | ✅ Yes | ❌ No | ✅ Yes | 🔶 Partially |
-| Login umask hardening (system-wide) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| SUID/SGID inventory & audit | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Login banners | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
-| Compliance catalog (CIS/BSI/STIG) | ✅ Yes | ❌ No | 🔶 Partially | 🔶 Partially |
-| Exception system (per-check modes) | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Rollback action report | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Config backups & restore | ✅ Yes | ❌ No | ❌ No | 🔶 Partially |
-| Full rollback + transaction log | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Selective removal | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Startup language selection (DE/EN) | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Sudo smoke-test + auto-rollback | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| Dry-run mode | ✅ Yes | 🔶 Minimal | ❌ No | 🔶 Partial |
-| No eval() usage | ✅ Yes | ❌ Uses eval | N/A (InSpec) | N/A (Ansible) |
+| ID | Title | Severity |
+|----|-------|----------|
+| SSH-001 | SSH service active | high |
+| SSH-009 | SSH password authentication status | high |
+| SSH-010 | SSH key-based authentication available | medium |
+| … | … | … |
 
 ---
 
-## 🔒 Security & Quality Improvements in v3.0.7
+## Changelog
 
-- **Compliance report on demand** — log menu option 11 now generates a fresh compliance report directly from the live system state, even without a prior hardening or verify run
-- **Mail delivery for compliance reports** — the compliance report can now be sent via the existing MSMTP configuration directly from the log menu
-- **Prompt & UX fixes** — all interactive prompts in the compliance report and MSMTP workflow now appear immediately without requiring an extra Enter; prompts write directly to `/dev/tty` where needed
-- **MSMTP config handling fixed** — the `/etc/msmtprc` copy confirmation stays visible when the system-wide config is missing; the runtime config path is no longer corrupted after an interactive confirmation
-- **PDF report workflow hardened** — protected PDF verification now succeeds reliably with the entered password; `qpdf` compatibility improved for older releases; `qpdf` can be installed on demand from within the workflow
-- **RETAINED from v3.0.6**: Stable check IDs, compliance catalog, exception system, rollback action report, governance files menu, and all previous hardening features
-
----
-
-## 📋 Changelog
+### v3.0.8
+- **FIXED:** Assessment matrix now evaluates SSH-010 in the compliance matrix
+- **IMPROVED:** New assessment helper checks the current administrative user's `~/.ssh` for Ed25519 public keys and `authorized_keys` entries
+- **IMPROVED:** SSH-010 failure details now explicitly mention when `PasswordAuthentication=no` and no Ed25519 key reference exists
+- **IMPROVED:** SSH-009/SSH-010 titles made neutral to avoid contradictory RED findings; SSH-009 severity raised to `high`
 
 ### v3.0.7
-- **NEW:** Log menu option 11 generates a fresh compliance report from live system state on demand
-- **NEW:** Optional mail delivery for the compliance report via existing MSMTP configuration
-- **IMPROVED:** Compliance report workflow works even without a prior hardening/verify run
+- **NEW:** Log menu option 11 generates a fresh compliance report from the live system state on demand
+- **NEW:** Optional mail delivery for the compliance report via existing msmtp configuration
+- **IMPROVED:** Compliance report workflow works even if no prior hardening/verify run created the report file
 - **FIXED:** Protected PDF verification now succeeds reliably with the entered password
-- **FIXED:** Compliance report mail workflow compatible with older `qpdf` releases; `qpdf` can be installed on demand
-- **FIXED:** Raw TSV prompt displayed immediately without requiring an extra Enter
-- **FIXED:** `/etc/msmtprc` copy confirmation stays visible when system-wide msmtp config is missing
-- **FIXED:** msmtp config lookup no longer corrupts the runtime config path after an interactive confirmation
+- **FIXED:** Compliance report mail workflow is compatible with older qpdf releases and can install qpdf on demand
+- **FIXED:** Raw TSV prompt displayed immediately — no longer requires an extra Enter to continue
+- **FIXED:** Interactive `/etc/msmtprc` copy confirmation remains visible when system-wide msmtp config is missing
+- **FIXED:** msmtp config lookup no longer corrupts the runtime config path after an interactive copy confirmation
 
 ### v3.0.6
-- **NEW:** Stable check IDs and centralized severity model for all hardening checks
-- **NEW:** Script-managed compliance catalog with CIS/BSI/STIG mapping fields and machine-readable TSV report
+- **NEW:** Stable check IDs, severity model and centralized check metadata
+- **NEW:** Script-managed compliance catalog with CIS/BSI/STIG mapping fields
 - **NEW:** Exception system with per-check modes: `disable`, `warn`, `assessment-only`
-- **NEW:** Governance files menu helpers (log menu option 11) to view/edit catalog and exception definitions
-- **NEW:** Rollback action report with reverted items, failures, manual review points, and expected RED findings
+- **NEW:** Governance files menu — view/edit catalog and exception definitions from within the script
+- **NEW:** Rollback action report with reverted items, failures, manual review points and expected RED findings
 
 ### v3.0.5
-- **NEW:** `strict` SSH crypto policy mode with explicit Ciphers/MACs/KEX pinning
-- **IMPROVED:** Umask hardening upgraded to full system-wide baseline (login.defs + shell hook + systemd drop-ins)
-- **IMPROVED:** Assessment validates system-wide umask coverage and treats missing strict SSH crypto pinning as a finding
-- **IMPROVED:** Rollback fully reverts SSH strict crypto policy and all systemd umask drop-ins
+- **NEW:** Strict SSH crypto policy mode (`strict`) for explicit Ciphers/MACs/KEX pinning
+- **NEW:** System-wide UMASK hardening via `login.defs`, shell hook and systemd drop-ins
+- **IMPROVED:** Assessment treats missing strict SSH crypto pinning as a finding
+- **IMPROVED:** Rollback and selective remove fully revert SSH strict crypto policy and umask drop-ins
 
 ### v3.0.4
-- **IMPROVED:** Recommended mode actively offers baseline fixes for RED findings (auditd, AIDE, login umask, SUID/SGID baseline, SSH crypto policy)
-- **NEW:** SSH crypto policy mode (`off` | `modern` | `fips-compatible`) with config validation and rollback
-- **NEW:** Login umask hardening via `/etc/login.defs` and `/etc/profile.d/`
-- **NEW:** SUID/SGID inventory baseline + daily audit-only cron reporting
-- **IMPROVED:** auditd ruleset expanded with STIG-style coverage
-- **FIXED:** Multiple SSH config, assessment logic, and idempotence improvements
+- **NEW:** System-wide default umask hardening (`/etc/login.defs` + `/etc/profile.d`)
+- **NEW:** SSH crypto policy mode (`off` | `modern` | `fips-compatible`) with validation and rollback
+- **NEW:** SUID/SGID inventory baseline with daily audit-only cron reporting
+- **IMPROVED:** Recommended mode actively offers baseline fixes for real RED findings
+- **IMPROVED:** auditd ruleset expanded with STIG-style coverage (session, time, permissions, hostname, modprobe, GRUB)
+- **IMPROVED:** All additions are service-aware — avoids breaking Nextcloud, AdGuard Home, Caddy, Docker, Podman
 
 ---
 
-## 📢 Notes
+## Requirements
 
-- Covers a **CIS/BSI-oriented baseline** for Debian/Ubuntu without heavy compliance overhead
-- Perfect for **root servers**, **VPS**, **home labs**, and **private clouds**
-- Lightweight, modular, and fully interactive
-- Backups are created automatically, but keeping separate backups before critical changes is recommended
+- Debian 11+ or Ubuntu 20.04+
+- Bash 4.x+
+- Root / sudo access
+- Optional: `msmtp` for mail delivery, `qpdf` for PDF report protection, `aide`, `auditd`, `apparmor`
 
-## 📄 License
+---
 
-MIT License — see [LICENSE](LICENSE) for details.
+## License
 
-## 🤝 Contributions & Feedback
+MIT — Free to use, modify and distribute. No warranty. Use at your own risk.
 
-Suggestions, bug reports, and pull requests are welcome. Every bit of input helps improve the script!
+---
+
+## Author
+
+**Paul Schumacher** — [github.com/ptech2009](https://github.com/ptech2009)
