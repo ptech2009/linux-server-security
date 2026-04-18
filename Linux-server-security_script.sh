@@ -2,10 +2,16 @@
 
 # ============================================================================
 # Linux Server Security Script
-# Version: 3.0.7
+# Version: 3.0.8
 # Author: Paul Schumacher
 # Purpose: Audit and harden Debian/Ubuntu servers — CIS/BSI-oriented baseline
 # License: MIT — Free to use, but at your own risk. NO WARRANTY.
+#
+# Changelog v3.0.8:
+# - FIXED v3.0.8: Assessment matrix now evaluates SSH-010 in the compliance matrix
+# - IMPROVED v3.0.8: New assessment helper checks the current administrative user's ~/.ssh for Ed25519 public keys and authorized_keys entries
+# - IMPROVED v3.0.8: SSH-010 failure details now explicitly mention when PasswordAuthentication=no and no Ed25519 key reference exists
+# - IMPROVED v3.0.8: SSH-009/SSH-010 titles made neutral to avoid contradictory RED findings; SSH-009 severity raised to high
 #
 # Changelog v3.0.7:
 # - NEW v3.0.7: Log menu option 11 now generates a fresh compliance report from the live system state on demand
@@ -64,7 +70,7 @@ set -uo pipefail
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-readonly SCRIPT_VERSION="3.0.7"
+readonly SCRIPT_VERSION="3.0.8"
 readonly JOURNALD_MAX_USE="${JOURNALD_MAX_USE:-1G}"
 readonly SCRIPT_LOG_FILE="/var/log/security_script_changes.log"
 readonly TRANSACTION_LOG="/var/log/security_script_transactions.log"
@@ -274,7 +280,7 @@ register_check_meta() {
 init_check_catalog_metadata() {
     (( ${#CHECK_STABLE_ID[@]} > 0 )) && return 0
 
-    register_check_meta "SSH_KEY_GEN"           "SSH-010"     "medium"   "Administrative Ed25519 SSH key available"                    "ssh"         "CIS: Secure administrative access / SSH authentication"          "BSI: SYS.1.3 SSH administration"                         "STIG: OpenSSH administrative authentication"                 "Operational safeguard for hardened SSH environments"
+    register_check_meta "SSH_KEY_GEN"           "SSH-010"     "high"     "SSH admin key posture"                    "ssh"         "CIS: Secure administrative access / SSH authentication"          "BSI: SYS.1.3 SSH administration"                         "STIG: OpenSSH administrative authentication"                 "Operational safeguard for hardened SSH environments"
     register_check_meta "SSH_HARDENING"         "SSH-900"     "info"     "Managed SSH baseline drop-in state"                           "ssh"         "CIS: SSH server baseline management"                           "BSI: SYS.1.3 SSH configuration management"                "STIG: OpenSSH configuration management"                      "Synthetic orchestration check for managed baseline state"
     register_check_meta "SSH_ROOT_LOGIN"        "SSH-001"     "high"     "Disable direct root SSH login"                                "ssh"         "CIS: SSH server root login restrictions"                      "BSI: SYS.1.3 Secure remote administration"                "STIG: OpenSSH prohibit direct root login"                   ""
     register_check_meta "SSH_PASSWORD_AUTH"     "SSH-002"     "critical" "Disable SSH password authentication"                          "ssh"         "CIS: SSH password authentication disabled"                    "BSI: SYS.1.3 Strong authentication for admin access"      "STIG: OpenSSH disallow password authentication"             ""
@@ -284,7 +290,7 @@ init_check_catalog_metadata() {
     register_check_meta "SSH_GRACE_TIME"        "SSH-006"     "medium"   "Restrict SSH login grace time"                                "ssh"         "CIS: SSH session hardening"                                    "BSI: SYS.1.3 Protect remote access sessions"               "STIG: OpenSSH login grace time configuration"               ""
     register_check_meta "SSH_MAX_AUTH"          "SSH-007"     "medium"   "Restrict SSH authentication retries"                          "ssh"         "CIS: SSH authentication retry limits"                         "BSI: SYS.1.3 Resist brute-force on remote admin"           "STIG: OpenSSH MaxAuthTries configuration"                   ""
     register_check_meta "SSH_CRYPTO_POLICY"     "SSH-008"     "high"     "Pin approved SSH crypto policy"                               "ssh"         "CIS: SSH cryptographic policy / approved algorithms"          "BSI: SYS.1.3 Approved cryptography for SSH"                "STIG: OpenSSH approved ciphers MACs and KEX"                ""
-    register_check_meta "SSH_GOOGLE_2FA"        "SSH-009"     "medium"   "Enable second factor for SSH administration"                  "ssh"         "CIS: MFA for privileged remote administration"                "BSI: ORP Identity and access management / MFA"             "STIG: Multifactor administrative remote access"             ""
+    register_check_meta "SSH_GOOGLE_2FA"        "SSH-009"     "high"     "SSH admin MFA posture"                  "ssh"         "CIS: MFA for privileged remote administration"                "BSI: ORP Identity and access management / MFA"             "STIG: Multifactor administrative remote access"             ""
     register_check_meta "UNATTENDED_UPGRADES"   "PATCH-001"   "high"     "Apply security updates automatically"                         "patching"    "CIS: Automated patching / security updates"                   "BSI: OPS Patch and change management"                      "STIG: Timely installation of security patches"              ""
     register_check_meta "UFW_ACTIVE"            "NET-001"     "high"     "Host firewall active"                                         "network"     "CIS: Host-based firewall enabled"                             "BSI: NET Network filtering on hosts"                       "STIG: Host firewall enabled and managed"                     ""
     register_check_meta "FAIL2BAN"              "NET-002"     "medium"   "Brute-force protection active"                                "network"     "CIS: Protect exposed services from brute-force"               "BSI: Detection and response for repeated login failures"   "STIG: Automated response to repeated failed logons"         ""
@@ -1950,6 +1956,41 @@ normalize_matrix_status() {
         INFO|WARN|SKIP|NA|N/A|EXCEPTION) echo "YELLOW" ;;
         *) echo "RED" ;;
     esac
+}
+
+assess_ssh_admin_key() {
+    local current_user="${SUDO_USER:-$(whoami)}"
+    local user_home existing_pub_count authorized_count total_count
+    local ssh_pass_effective password_disabled
+
+    user_home=$(eval echo "~$current_user")
+    existing_pub_count=0
+    authorized_count=0
+    total_count=0
+    password_disabled=false
+
+    if [[ -d "$user_home/.ssh" ]]; then
+        existing_pub_count=$(find "$user_home/.ssh" -maxdepth 1 -type f -name "*.pub"             -exec grep -Eil '^[[:space:]]*ssh-ed25519[[:space:]]+' {} + 2>/dev/null | wc -l)
+
+        if [[ -f "$user_home/.ssh/authorized_keys" ]]; then
+            authorized_count=$(grep -Eic '^[[:space:]]*ssh-ed25519[[:space:]]+'                 "$user_home/.ssh/authorized_keys" 2>/dev/null || true)
+        fi
+    fi
+
+    total_count=$(( existing_pub_count + authorized_count ))
+
+    ssh_pass_effective="$(get_effective_sshd_config "PasswordAuthentication" | tr '[:upper:]' '[:lower:]')"
+    [[ "$ssh_pass_effective" == "no" ]] && password_disabled=true
+
+    if (( total_count > 0 )); then
+        record_check "SSH_KEY_GEN" "PASS"             "Found ${total_count} Ed25519 key reference(s) for admin user '${current_user}' (pub=${existing_pub_count}, authorized_keys=${authorized_count})"
+    else
+        if $password_disabled; then
+            record_check "SSH_KEY_GEN" "FAIL"                 "No Ed25519 key found for admin user '${current_user}' in ${user_home}/.ssh while PasswordAuthentication=no"
+        else
+            record_check "SSH_KEY_GEN" "FAIL"                 "No Ed25519 key found for admin user '${current_user}' in ${user_home}/.ssh"
+        fi
+    fi
 }
 
 count_red_checks() {
@@ -4773,6 +4814,7 @@ run_assessment() {
         record_check "SSH_CRYPTO_POLICY" "FAIL" "Strict SSH crypto policy not pinned/effective"
     fi
     ssh_google_2fa_assessment
+    assess_ssh_admin_key
 
     # Firewall
     is_package_installed ufw && ufw status 2>/dev/null | grep -q "Status: active" \
